@@ -1,0 +1,35 @@
+name: Sync Upstream
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs every day at midnight UTC
+  workflow_dispatch:      # Allows manual triggering from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push changes back to your fork
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync with Upstream
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          
+          # IMPORTANT: Update this URL to the original repository's URL
+          UPSTREAM_URL="https://github.com/eugr/spark-vllm-docker.git"
+          
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream main
+          git checkout main
+          
+          # Attempt a fast-forward merge. 
+          # This will succeed if you haven't made any commits to your main branch.
+          git merge upstream/main --no-edit
+          
+          git push origin main
