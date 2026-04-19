@@ -1,0 +1,41 @@
+recipe_version: "1"
+name: Qwen3.5-122B-INT4-AutoRound (personal)
+description: vLLM serving local Qwen3.5-122B-INT4-AutoRound
+
+solo_only: true
+container: vllm-node-tf5
+
+build_args:
+  - --tf5
+
+mods:
+  - mods/fix-qwen3.5-autoround
+  - mods/fix-qwen3.5-chat-template
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.70
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+command: |
+  vllm serve /opt/llms/models/Qwen3.5-122B-A10B-int4-AutoRound \
+    --served-model-name qwen3p5-122b-a10b \
+    --max-model-len {max_model_len} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --port {port} \
+    --host {host} \
+    --load-format fastsafetensors \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_xml \
+    --reasoning-parser qwen3 \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --trust-remote-code \
+    --chat-template unsloth.jinja \
+    -tp {tensor_parallel}
