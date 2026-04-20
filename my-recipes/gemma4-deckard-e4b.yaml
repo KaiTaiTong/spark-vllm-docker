@@ -1,0 +1,42 @@
+recipe_version: "1"
+name: Gemma4-E4B-DECKARD (personal)
+description: vLLM serving local Gemma4-E4B DECKARD HERETIC UNCENSORED Thinking
+
+solo_only: true
+container: vllm-node-tf5
+
+build_args:
+  - --tf5
+
+mods:
+  - mods/fix-gemma4-tool-parser
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.25
+  max_model_len: 131072
+  max_num_batched_tokens: 8192
+
+env: {}
+
+command: |
+  vllm serve /opt/llms/models/gemma-4-E4B-it-The-DECKARD-Claude-Opus-Expresso-Universe-HERETIC-UNCENSORED-Thinking \
+    --served-model-name gemma4-deckard \
+    --max-model-len {max_model_len} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --port {port} \
+    --host {host} \
+    --load-format fastsafetensors \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser gemma4 \
+    --reasoning-parser gemma4 \
+    --quantization fp8 \
+    --kv-cache-dtype fp8 \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --trust-remote-code \
+    --chat-template /opt/llms/models/gemma-4-E4B-it-The-DECKARD-Claude-Opus-Expresso-Universe-HERETIC-UNCENSORED-Thinking/chat_template-instruct.jinja \
+    --chat-template-kwargs '{"enable_thinking": true}' \
+    -tp {tensor_parallel}
