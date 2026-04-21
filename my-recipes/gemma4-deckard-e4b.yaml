@@ -38,5 +38,4 @@ command: |
     --max-num-batched-tokens {max_num_batched_tokens} \
     --trust-remote-code \
     --chat-template /opt/llms/models/gemma-4-E4B-it-The-DECKARD-Claude-Opus-Expresso-Universe-HERETIC-UNCENSORED-Thinking/chat_template-instruct.jinja \
-    --chat-template-kwargs '{"enable_thinking": true}' \
     -tp {tensor_parallel}
