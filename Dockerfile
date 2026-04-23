@@ -122,10 +122,15 @@ WORKDIR /workspace/flashinfer
 ARG FLASHINFER_PRS=""
 
 RUN if [ -n "$FLASHINFER_PRS" ]; then \
+        # Git requires a user identity to create merge commits
+        git config --global user.email "builder@example.com"; \
+        git config --global user.name "Docker Builder"; \
+        \
         echo "Applying PRs: $FLASHINFER_PRS"; \
         for pr in $FLASHINFER_PRS; do \
-            echo "Fetching and applying PR #$pr..."; \
-            curl -fL "https://github.com/flashinfer-ai/flashinfer/pull/${pr}.diff" | git apply -v; \
+            echo "Fetching and merging PR #$pr..."; \
+            git fetch origin pull/${pr}/head:pr-${pr}; \
+            git merge pr-${pr} --no-edit; \
         done; \
     fi
 
@@ -204,10 +209,15 @@ WORKDIR $VLLM_BASE_DIR/vllm
 ARG VLLM_PRS=""
 
 RUN if [ -n "$VLLM_PRS" ]; then \
+        # Git requires a user identity to create merge commits
+        git config --global user.email "builder@example.com"; \
+        git config --global user.name "Docker Builder"; \
+        \
         echo "Applying PRs: $VLLM_PRS"; \
         for pr in $VLLM_PRS; do \
-            echo "Fetching and applying PR #$pr..."; \
-            curl -fL "https://github.com/vllm-project/vllm/pull/${pr}.diff" | git apply -v; \
+            echo "Fetching and merging PR #$pr..."; \
+            git fetch origin pull/${pr}/head:pr-${pr}; \
+            git merge pr-${pr} --no-edit; \
         done; \
     fi
 
@@ -306,7 +316,7 @@ ARG PRE_TRANSFORMERS=0
 # Install deps
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
      uv pip install torch==2.11.0 torchvision torchaudio triton --index-url https://download.pytorch.org/whl/cu130 && \
-     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2"
+     uv pip install nvidia-nvshmem-cu13 "apache-tvm-ffi<0.2" nvidia-cutlass-dsl-libs-cu13
 
 # Install wheels from host ./wheels/ (bind-mounted from build context — no layer bloat)
 # With --tf5: override vLLM's transformers<5 constraint to get transformers>=5
