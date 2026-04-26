@@ -1,0 +1,43 @@
+recipe_version: "1"
+name: Qwen3.6-27B-INT4-AutoRound (personal)
+description: vLLM serving local Qwen3.6-27B INT4 AutoRound (VLM, MTP speculative decoding)
+
+solo_only: true
+container: vllm-node-tf5
+
+build_args:
+  - --tf5
+
+mods:
+  - mods/fix-qwen3-next-autoround
+  - mods/fix-qwen3.5-autoround
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.70
+  max_model_len: 262144
+  max_num_batched_tokens: 16384
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+command: |
+  vllm serve /opt/llms/models/Qwen3.6-27B-int4-AutoRound \
+    --served-model-name qwen36-27b-int4 \
+    --host {host} \
+    --port {port} \
+    --dtype half \
+    --max-model-len {max_model_len} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --kv-cache-dtype fp8 \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_xml \
+    --reasoning-parser qwen3 \
+    --speculative-config '{{"method": "mtp", "num_speculative_tokens": 1}}' \
+    --chat-template /opt/llms/models/Qwen3.6-27B-int4-AutoRound/chat_template.jinja \
+    --trust-remote-code \
+    -tp {tensor_parallel}
