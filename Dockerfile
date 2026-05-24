@@ -73,7 +73,11 @@ ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 WORKDIR $VLLM_BASE_DIR
 
 # Build NCCL with mesh support (TODO: only do it if arch is 12.1) - artifacts will be in /workspace/nccl/build/pkg/deb
-RUN git clone -b dgxspark-3node-ring https://github.com/zyang-dev/nccl.git && \
+# RUN git clone -b dgxspark-3node-ring https://github.com/zyang-dev/nccl.git && \
+#     cd nccl && make -j ${BUILD_JOBS} src.build NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121" && \
+#     make pkg.debian.build && apt install -y --no-install-recommends --allow-downgrades ./build/pkg/deb/*.deb
+
+RUN git clone -b v2.30u1 https://github.com/NVIDIA/nccl.git && \
     cd nccl && make -j ${BUILD_JOBS} src.build NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121" && \
     make pkg.debian.build && apt install -y --no-install-recommends --allow-downgrades ./build/pkg/deb/*.deb
 
@@ -221,15 +225,36 @@ RUN if [ -n "$VLLM_PRS" ]; then \
         done; \
     fi
 
-# TEMPORARY PATCH for broken FP8 kernels - https://github.com/vllm-project/vllm/pull/35568
-RUN curl -fsL https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/35568.diff -o pr35568.diff \
-    && if git apply --reverse --check pr35568.diff 2>/dev/null; then \
-         echo "PR 35568 already applied, skipping."; \
-       else \
-         echo "Applying PR 35568..."; \
-         git apply -v --exclude="tests/*" pr35568.diff; \
-       fi \
-    && rm pr35568.diff
+# # TEMPORARY PATCH for broken FP8 kernels - https://github.com/vllm-project/vllm/pull/35568
+# RUN curl -fsL https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/35568.diff -o pr35568.diff \
+#     && if git apply --reverse --check pr35568.diff 2>/dev/null; then \
+#          echo "PR 35568 already applied, skipping."; \
+#        else \
+#          echo "Applying PR 35568..."; \
+#          git apply -v --exclude="tests/*" pr35568.diff; \
+#        fi \
+#     && rm pr35568.diff
+
+# TEMPORARY PATCH: revert vLLM PR #41524 / commit c51df430,
+# which disables FlashInfer autotune and regresses DGX Spark throughput.
+RUN set -eux; \
+    patch_commit="c51df43005726a09c6eb7348e8c1b00501c70a8e"; \
+    target="vllm/config/vllm.py"; \
+    marker="https://github.com/flashinfer-ai/flashinfer/issues/3197"; \
+    if grep -q "$marker" "$target"; then \
+        echo "PR #41524 regression found; reverting ${patch_commit}"; \
+        if ! git revert --no-commit "$patch_commit"; then \
+            git revert --abort 2>/dev/null || true; \
+            echo "ERROR: PR #41524 appears present but could not be reverted"; \
+            exit 1; \
+        fi; \
+        if grep -q "$marker" "$target"; then \
+            echo "ERROR: revert completed but PR #41524 marker is still present"; \
+            exit 1; \
+        fi; \
+    else \
+        echo "PR #41524 regression marker not present; skipping revert"; \
+    fi
 
 # Prepare build requirements
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
