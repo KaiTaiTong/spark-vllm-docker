@@ -256,6 +256,28 @@ RUN set -eux; \
         echo "PR #41524 regression marker not present; skipping revert"; \
     fi
 
+# TEMPORARY PATCH: revert vLLM PR #43410 / commit 6e503868,
+# which moves MiniMax QK RMSNorm to an automatic CUDA IPC-backed fused path.
+# That path fails when tensor parallelism spans DGX Spark nodes.
+RUN set -eux; \
+    patch_commit="6e503868caa46f3afa87e8d3365495464fd75fb3"; \
+    target="vllm/model_executor/layers/minimax_rms_norm/rms_norm_tp.py"; \
+    marker="torch.ops.vllm.minimax_qk_norm_fusion"; \
+    if [ -f "$target" ] && grep -q "$marker" "$target"; then \
+        echo "PR #43410 regression found; reverting ${patch_commit}"; \
+        if ! git revert --no-commit "$patch_commit"; then \
+            git revert --abort 2>/dev/null || true; \
+            echo "ERROR: PR #43410 appears present but could not be reverted"; \
+            exit 1; \
+        fi; \
+        if [ -f "$target" ] && grep -q "$marker" "$target"; then \
+            echo "ERROR: revert completed but PR #43410 marker is still present"; \
+            exit 1; \
+        fi; \
+    else \
+        echo "PR #43410 regression marker not present; skipping revert"; \
+    fi
+
 # Prepare build requirements
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     python3 use_existing_torch.py && \
@@ -347,12 +369,12 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # With --tf5: override vLLM's transformers<5 constraint to get transformers>=5
 RUN --mount=type=bind,source=wheels,target=/workspace/wheels \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    PINNED_TORCH=$(python3 -c "import torch; print(torch.__version__)") && \
+    echo "torch==${PINNED_TORCH}" > /tmp/wheel-override.txt && \
     if [ "$PRE_TRANSFORMERS" = "1" ]; then \
-        echo "transformers>=5.0.0" > /tmp/tf-override.txt && \
-        uv pip install /workspace/wheels/*.whl --override /tmp/tf-override.txt; \
-    else \
-        uv pip install /workspace/wheels/*.whl; \
-    fi
+        echo "transformers>=5.0.0" >> /tmp/wheel-override.txt; \
+    fi && \
+    uv pip install /workspace/wheels/*.whl --override /tmp/wheel-override.txt
 
 # Setup environment for runtime
 ARG TORCH_CUDA_ARCH_LIST="12.1a"
@@ -365,8 +387,13 @@ ENV PATH=$VLLM_BASE_DIR:$PATH
 
 
 # Final extra deps
+# Pin torch via --override so transitive deps (e.g. instanttensor) can't trigger
+# a re-resolve that swaps the CUDA-built torch for PyPI's CPU wheel.
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install ray[default] fastsafetensors instanttensor
+    PINNED_TORCH=$(python3 -c "import torch; print(torch.__version__)") && \
+    echo "torch==${PINNED_TORCH}" > /tmp/torch-override.txt && \
+    uv pip install ray[default] fastsafetensors instanttensor \
+        --override /tmp/torch-override.txt
 
 # Fix NCCL
 RUN rm /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 && \
