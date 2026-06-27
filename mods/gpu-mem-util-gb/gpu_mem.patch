@@ -23,8 +23,8 @@ index 4fa7e1cfc..2ba591e84 100644
              "is_attention_free",
              "num_gpu_blocks_override",
              "enable_prefix_caching",
-@@ -235,6 +242,18 @@ class CacheConfig:
-             object.__setattr__(self, "user_specified_mamba_block_size", True)
+@@ -242,6 +249,18 @@ class CacheConfig:
+             self.user_specified_mamba_block_size = True
          return self
  
 +    @model_validator(mode="after")
@@ -163,8 +163,8 @@ diff --git a/vllm/v1/utils.py b/vllm/v1/utils.py
 index ba1db3282..acdaee5ae 100644
 --- a/vllm/v1/utils.py
 +++ b/vllm/v1/utils.py
-@@ -537,6 +537,9 @@ def report_usage_stats(
-             "dtype": str(vllm_config.model_config.dtype),
+@@ -678,6 +678,9 @@ def report_usage_stats(
+             "dtype": str(model_config.dtype),
              "block_size": vllm_config.cache_config.block_size,
              "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
 +            "gpu_memory_utilization_gb": (
@@ -172,7 +172,7 @@ index ba1db3282..acdaee5ae 100644
 +            ),
              "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
              # Quantization
-             "quantization": vllm_config.model_config.quantization,
+             "quantization": model_config.quantization,
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
 index d51bf2284..27b55114d 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
@@ -393,7 +393,7 @@ diff --git a/vllm/v1/worker/utils.py b/vllm/v1/worker/utils.py
 index b693adbf2..a4d78b0ee 100644
 --- a/vllm/v1/worker/utils.py
 +++ b/vllm/v1/worker/utils.py
-@@ -405,21 +405,38 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) ->
+@@ -405,21 +405,36 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) ->
      Calculate the amount of memory required by vLLM, then validate
      that the current amount of free memory is sufficient for that.
      """
@@ -418,12 +418,10 @@ index b693adbf2..a4d78b0ee 100644
 +                f"total GPU memory ({format_gib(init_snapshot.total_memory)} GiB). "
 +                f"Reduce gpu_memory_utilization_gb or use a smaller value."
 +            )
-+        safety_margin = int(0.5 * 1024**3)
-+        if requested_memory > init_snapshot.free_memory + safety_margin:
++        if requested_memory > init_snapshot.free_memory:
 +            raise ValueError(
 +                f"Requested memory ({format_gib(requested_memory)} GiB) exceeds "
 +                f"available memory ({format_gib(init_snapshot.free_memory)} GiB) "
-+                f"with safety margin ({format_gib(safety_margin)} GiB). "
 +                f"Reduce gpu_memory_utilization_gb or free up GPU memory."
 +            )
 +    else:

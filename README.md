@@ -79,6 +79,15 @@ An initial build speed depends on your Internet connection speed and whether the
     --load-format fastsafetensors
 ```
 
+To publish the server port instead of using host networking, pass the Docker port mapping before `exec`:
+
+```bash
+./launch-cluster.sh --solo -p 8000:8000 exec \
+  vllm serve \
+    QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ \
+    --port 8000 --host 0.0.0.0
+```
+
 **On a cluster**
 
 It's recommended to download the model on one node and distribute across the cluster using ConnectX interconnect prior to launching. This is to avoid re-downloading the model from the Internet on every node in the cluster.
@@ -132,6 +141,180 @@ Don't do it every time you rebuild, because it will slow down compilation times.
 For periodic maintenance, I recommend using a filter: `docker builder prune --filter until=72h`
 
 ## CHANGELOG
+
+### 2026-06-22
+
+#### Deepseek V4 Flash support
+
+Support and a recipe for Deepseek V4 Flash has been added based on a newly merged vLLM PR. Please note that this PR requires the DeepGEMM `nv_dev` branch, which is not present in default vLLM builds, but included in this community build.
+
+To run DSV4F you will need a Spark cluster (2 or more nodes).
+
+To run:
+
+```bash
+git pull
+./build-and-copy.sh -c
+./hf-download.sh deepseek-ai/DeepSeek-V4-Flash -c
+./run-recipe.sh deepseek-v4-flash --no-ray
+```
+
+#### DeepGEMM support added
+
+vLLM now uses NVIDIA branch for DeepGEMM that includes support for sm12x GPU family, including DGX Spark.
+Please note that it is currently not compatible with NVRTC compiler, so `DG_JIT_USE_NVRTC` has been turned off for new builds.
+
+#### MiniMax AWQ Weight-Shape Loader Workaround
+
+Added a Dockerfile-level workaround for a vLLM nightly regression where compressed-tensors MoE `weight_shape` metadata is treated as a scalar during load, causing affected MoE quantized models to fail with `shape '[]' is invalid for input of size 2`.
+
+### 2026-06-18
+
+#### KV Cache Preallocation Cleanup Mod & Updated Qwen3.5-397B recipe for dual Sparks
+
+Added `mods/kv-cache-prealloc-cleanup`, which clears cached CUDA allocator memory immediately before vLLM allocates KV cache blocks. The dual-node Qwen3.5-397B INT4 AutoRound recipe now applies it after `mods/gpu-mem-util-gb` to reduce startup OOM risk from temporary CUDA graph/profile buffers on DGX Spark unified memory.
+
+The same recipe now keeps the 108 GiB startup reservation, sets `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, and uses a manual 2.25 GiB KV-cache allocation to bypass vLLM's conservative profiler-derived KV budget. The cleanup mod makes that setting skip CUDA graph memory profiling entirely, avoids profiling-only graph-pool residue before KV-cache sizing, and allows the fixed-GiB reservation argument to coexist with `--kv-cache-memory-bytes` for this model to load. This may result in a bit of swap to be used to offload unused resources, so make sure swap is enabled.
+
+#### Added recipes for nvidia/Qwen3.6-35B-A3B-NVFP4
+
+Added recipes for NVIDIA's mixed-precision quant for Qwen3.6-35B model. It has a higher precision and an improved performance compared to the earlier NVFP4 quants.
+
+Use:
+- `qwen3.6-35b-a3b-nvfp4` to run with MTP on
+- `qwen3.6-35b-a3b-nvfp4-no-mtp` to run without MTP.
+
+### 2026-06-10
+
+#### DiffusionGemma Recipes and Mod
+
+Added day0 support for Google DeepMind's DiffusionGemma model via `mods/diffusiongemma`. Check out [NVIDIA blog](https://developer.nvidia.com/blog/run-diffusiongemma-on-nvidia-for-developer-ready-high-throughput-text-generation/) for details!
+
+Added four solo-only DiffusionGemma recipes:
+
+- `diffusion-gemma-bf16-thinking` for `google/diffusiongemma-26B-A4B-it` with thinking enabled.
+- `diffusion-gemma-bf16` for `google/diffusiongemma-26B-A4B-it` with thinking disabled.
+- `diffusion-gemma-nvfp4-thinking` for `nvidia/diffusiongemma-26B-A4B-it-NVFP4` with thinking enabled.
+- `diffusion-gemma-nvfp4` for `nvidia/diffusiongemma-26B-A4B-it-NVFP4` with thinking disabled.
+
+The non-thinking variants still keep `--reasoning-parser gemma4`, since these models can emit Gemma4 channel markers even when thinking is disabled.
+
+Example:
+
+```bash
+./hf-download.sh google/diffusiongemma-26B-A4B-it
+./run-recipe.sh diffusion-gemma-bf16-thinking --solo
+```
+
+#### `run-recipe.sh` Launch Flag Passthrough
+
+`run-recipe.sh` now passes additional `launch-cluster.sh` flags through when running recipes:
+`--apply-mod`, `-p` / `--publish`, and `--keep-entrypoint`.
+
+Port publishing is still solo-only, matching `launch-cluster.sh` behavior.
+
+### 2026-06-09
+
+#### Recipe Memory Defaults
+
+Raised the default `gpu_memory_utilization` from `0.7` to `0.8` across the main single-node and two-node recipes to match the current vLLM memory allocation behavior.
+
+### 2026-06-07
+
+#### Docker Base Image Compatibility
+
+The default CUDA base image was changed to `nvidia/cuda:13.0.2-devel-ubuntu24.04` for broader host compatibility.
+
+The Dockerfile also now passes `--allow-change-held-packages` when installing the custom NCCL Debian packages, avoiding apt failures when replacing held CUDA/NCCL packages during image builds.
+
+### 2026-06-06
+
+#### MiniMax Multi-Node Regression Workaround
+
+Added a targeted Dockerfile patch that disables the MiniMax QK RMSNorm CUDA IPC fused path introduced by vLLM PR #43410. The fused path can fail when tensor parallelism spans DGX Spark nodes; the workaround preserves MiniMax multi-node TP while avoiding a full upstream revert.
+
+### 2026-06-03
+
+#### Solo Port Publishing
+
+`launch-cluster.sh` now supports Docker-style `-p` / `--publish` port mappings in solo mode. When port publishing is used, the launcher switches from host networking to Docker bridge networking for that solo container.
+
+Example:
+
+```bash
+./launch-cluster.sh --solo -p 8000:8000 exec vllm serve ...
+```
+
+### 2026-05-29
+
+#### Wheel Freshness Detection
+
+Improved `build-and-copy.sh` wheel freshness checks so newer locally built wheels are not overwritten just because their filenames differ from the latest release assets. The script now compares local wheel mtimes against remote release asset timestamps before deciding to download. Also switched from using GitHub API to regular HTTP checks to avoid throttling.
+
+#### `gpu-mem-util-gb` Patch Refresh
+
+Refreshed `mods/gpu-mem-util-gb` so it applies against newer vLLM `CacheConfig` code after upstream line/context drift.
+
+### 2026-05-28
+
+#### StepFun Step 3.7 Flash Support
+
+Added support for StepFun [Step 3.7 Flash multimodal model](https://developer.nvidia.com/blog/run-step-3-7-flash-on-nvidia-gpus-with-enterprise-ready-multimodal-ai).
+
+Requires at least 2 Sparks in a cluster. Both FP8 and NVFP4 checkpoints are supported. FP8 requires more memory, so using NVFP4 is recommended.
+
+Update the repo and build a fresh container first:
+
+```bash
+git pull
+./build-and-copy.sh --cleanup -c
+```
+
+To run NVFP4 version:
+
+Download the model:
+
+```bash
+./hf-download.sh stepfun-ai/Step-3.7-Flash-NVFP4 -c
+```
+
+Run:
+
+```bash
+./run-recipe.sh step-3.7-flash-nvfp4 --no-ray
+```
+
+To run FP8 version:
+
+Download the model:
+
+```bash
+./hf-download.sh stepfun-ai/Step-3.7-Flash-FP8 -c
+```
+
+Run:
+
+```bash
+./run-recipe.sh step-3.7-flash-fp8 --no-ray
+```
+
+Please note that `--no-ray` is required for FP8 to fit with full context!
+
+#### `use-official-vllm` NCCL Workaround
+
+Updated `mods/use-official-vllm` to also handle the NCCL load-order bug tracked in [vllm-project/vllm#42354](https://github.com/vllm-project/vllm/issues/42354). When both the pip-installed `nvidia/nccl/lib/libnccl.so.2` and system `libnccl2` are present, the mod redirects the pip-installed NCCL path to the system `/usr/lib` soname, matching the manual workaround that fixes multi-node DGX Spark hangs.
+
+Use it with official vLLM images before starting the model:
+
+```bash
+./launch-cluster.sh -t vllm/vllm-openai:latest \
+  --apply-mod mods/use-official-vllm \
+  exec vllm serve ...
+```
+
+#### Torch Pinning During Wheel Install
+
+Pinned the already-installed CUDA torch build via `uv --override` when installing locally built wheels and final runtime dependencies in both Dockerfiles. This prevents transitive dependencies from re-resolving torch to a CPU wheel during image builds.
 
 ### 2026-05-22
 
@@ -356,7 +539,7 @@ You can run the model with the following command on the head node:
 ```
 
 Please, note `--no-ray` is necessary to fit full context. It also improves inference speed by ~1 t/s.
-By default it will try to allocate 112 GB for vLLM on each node. You can change this by changing `--gpu-memory-utilization` (e.g. `--gpu-memory-utilization 113`), but please be aware that it uses GB instead of percentage **for this recipe**. 
+By default it will try to allocate 108 GiB for vLLM on each node. You can change this by changing `gpu_memory_utilization` in the recipe or passing `--gpu-mem`; this recipe maps that value to `--gpu-memory-utilization-gb`, so it is GiB rather than a percentage.
 
 **KNOWN ISSUES**:
 
@@ -624,6 +807,7 @@ Added `--gpu-arch <arch>` flag to `build-and-copy.sh`. This allows specifying th
 - `~/.cache/vllm`
 - `~/.cache/flashinfer`
 - `~/.triton`
+- `~/.tilelang`
 
 To disable this behavior (clean start), use `--no-cache-dirs` flag.
 
@@ -655,6 +839,12 @@ Example:
 # Run with overrides
 ./run-recipe.sh glm-4.7-flash-awq --solo --port 9000 --gpu-mem 0.8
 
+# Apply an extra launch-cluster mod on top of recipe mods
+./run-recipe.sh glm-4.7-flash-awq --solo --apply-mod mods/use-official-vllm
+
+# Publish ports in solo mode
+./run-recipe.sh glm-4.7-flash-awq --solo -p 8000:8000
+
 # Cluster deployment
 ./run-recipe.sh glm-4.7-nvfp4 --setup
 ```
@@ -677,7 +867,7 @@ Thanks @raphaelamorim for the contribution!
 
 `./build-and-copy.sh` now supports ability to apply vLLM PRs to builds. PR is applied to the most recent vLLM commit (or specific vllm-ref if set). This does NOT apply to wheels build and MXFP4 special build!
 
-To use, just specify `--apply-vllm-pr <pr_num>` in the arguments. Please note that it may fail depending on whether the PR needs a rebase for the specified vLLM reference/main branch. Use with caution!
+To use, just specify `--apply-vllm-pr <pr_num>` in the arguments. When custom vLLM PRs are specified, Dockerfile preset vLLM PRs are skipped unless `--apply-preset-vllm-prs` is also specified. Please note that it may fail depending on whether the PR needs a rebase for the specified vLLM reference/main branch. Use with caution!
 
 Example:
 
@@ -1062,9 +1252,13 @@ Using a different username:
 | `--gpu-arch <arch>` | Target GPU architecture (default: `12.1a`) |
 | `--rebuild-flashinfer` | Skip prebuilt wheel download; force a fresh local FlashInfer build |
 | `--rebuild-vllm` | Force rebuild vLLM from source |
+| `--force-flashinfer-download` | Force download FlashInfer wheels, skipping cached wheel checks |
+| `--force-vllm-download` | Force download vLLM wheels, skipping cached wheel checks |
+| `--force-download` | Force download all prebuilt wheels, skipping cached wheel checks |
 | `--vllm-ref <ref>` | vLLM commit SHA, branch or tag (default: `main`) |
 | `--flashinfer-ref <ref>` | FlashInfer commit SHA, branch or tag (default: `main`) |
 | `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during build. Can be specified multiple times. |
+| `--apply-preset-vllm-prs` | Also apply Dockerfile preset vLLM PRs when `--apply-vllm-pr` is specified. |
 | `--apply-flashinfer-pr <pr-num>` | Apply a FlashInfer PR patch during build. Can be specified multiple times. |
 | `--tf5` | Install transformers v5 (5.0.0 or higher). Aliases: `--pre-tf, --pre-transformers`. |
 | `--exp-mxfp4` | Build with experimental native MXFP4 support. Alias: `--experimental-mxfp4`. |
@@ -1121,7 +1315,8 @@ Assumptions and limitations:
 - It will ignore IPs associated with the 2nd "clone" of the physical interface. For instance, the outermost port on Spark has two logical Ethernet interfaces: `enp1s0f1np1` and `enP2p1s0f1np1`. Only `enp1s0f1np1` will be used. To override, use `--eth-if` parameter.
 - It assumes that the same physical interfaces are named the same on all nodes (IOW, enp1s0f1np1 refers to the same physical port on all nodes). If it's not the case, you will have to launch cluster nodes manually or modify the script.
 - It clears the Docker image entrypoint by default so images that define an entrypoint, such as `vllm-openai`, can still start as idle cluster containers before commands are executed. Use `--keep-entrypoint` to keep the image entrypoint.
-- It mounts `~/.cache/huggingface`, `~/.cache/vllm`, `~/.cache/flashinfer`, and `~/.triton` by default. Use `--no-cache-dirs` to skip the vLLM/FlashInfer/Triton cache mounts. Add any other mounts with the `VLLM_SPARK_EXTRA_DOCKER_ARGS` environment variable, e.g. `VLLM_SPARK_EXTRA_DOCKER_ARGS="-v $HOME/my-data:/data" ./launch-cluster.sh ...`. Use `$HOME` instead of `~` because `~` will not expand when passed through the variable to Docker arguments.
+- In solo mode, `-p` / `--publish` can be used to publish ports in Docker format, for example `-p 8000:8000`. When port publishing is used, the launcher does not use host networking. Port publishing is not supported in cluster mode.
+- It mounts `~/.cache/huggingface`, `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton`, and `~/.tilelang` by default. Use `--no-cache-dirs` to skip the vLLM/FlashInfer/Triton/TileLang cache mounts. Add any other mounts with the `VLLM_SPARK_EXTRA_DOCKER_ARGS` environment variable, e.g. `VLLM_SPARK_EXTRA_DOCKER_ARGS="-v $HOME/my-data:/data" ./launch-cluster.sh ...`. Use `$HOME` instead of `~` because `~` will not expand when passed through the variable to Docker arguments.
 
 
 **Start in daemon mode (background):**
@@ -1179,9 +1374,10 @@ You can override the auto-detected values if needed:
 | `--nccl-debug` | NCCL debug level (e.g., INFO, WARN). Defaults to INFO if flag is present but value is omitted. |
 | `--check-config` | Check configuration and auto-detection without launching. |
 | `--solo` | Solo mode: skip autodetection, launch only on current node, do not launch Ray cluster |
+| `-p, --publish` | Publish a container port in Docker format, for example `-p 8000:8000`. Solo mode only; replaces host networking. Can be used multiple times. |
 | `--no-ray` | No-Ray mode: run multi-node vLLM without Ray (uses PyTorch distributed backend). |
 | `--master-port` / `--head-port` | Port for cluster coordination: Ray head port or PyTorch distributed master port (default: 29501). |
-| `--no-cache-dirs` | Do not mount default cache directories (~/.cache/vllm, ~/.cache/flashinfer, ~/.triton). |
+| `--no-cache-dirs` | Do not mount default cache directories (~/.cache/vllm, ~/.cache/flashinfer, ~/.triton, ~/.tilelang). |
 | `--keep-entrypoint` | Keep the Docker image entrypoint instead of clearing it before launching the idle cluster container. |
 | `--launch-script` | Path to bash script to execute in the container (from examples/ directory or absolute path). If launch script is specified, action should be omitted. |
 | `-d` | Run in daemon mode (detached). |
@@ -1209,6 +1405,8 @@ When `--non-privileged` is specified:
 - RDMA devices are exposed via `--device=/dev/infiniband`
 - Resource limits are applied: memory (110GB), memory+swap (120GB), pids (4096)
 
+All launch modes set Docker's open-file ulimit to `1048576`, which avoids loader failures when highly sharded models are opened in parallel by Ray workers. Override it with `VLLM_SPARK_NOFILE_LIMIT` if your host requires a different value.
+
 These resource limits can be customized:
 ```bash
 ./launch-cluster.sh --non-privileged \
@@ -1228,6 +1426,7 @@ docker run -it --rm \
   --net=host \
   --ipc=host \
   --privileged \
+  --ulimit nofile=1048576:1048576 \
   --name vllm_node \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   vllm-node bash
@@ -1240,9 +1439,10 @@ Inside the container, run `vllm serve ...` directly for solo inference.
 
 **Flags Explained:**
 
-  * `--net=host`: **Required.** Ray and NCCL need full access to host network interfaces.
+  * `--net=host`: **Required for cluster commands.** Ray and NCCL need full access to host network interfaces.
   * `--ipc=host`: **Recommended.** Allows shared memory access for PyTorch/NCCL. As an alternative, you can set it via `--shm-size=16g`.
   * `--privileged`: **Recommended for InfiniBand.** Grants the container access to RDMA devices (`/dev/infiniband`). As an alternative, you can pass `--ulimit memlock=-1 --ulimit stack=67108864 --device=/dev/infiniband`.
+  * `--ulimit nofile=1048576:1048576`: **Recommended for large sharded models.** Prevents `Too many open files` errors during parallel safetensors metadata loading.
 
 -----
 
@@ -1315,7 +1515,7 @@ The new shell inherits the container environment, including NCCL, Ray, and vLLM 
 
 ## 5\. Mods and Patches
 
-The vLLM Docker setup supports applying custom mods and patches to address specific model compatibility issues or apply experimental features. This functionality is primarily managed through the `--apply-mod` option in the cluster launch script.
+The vLLM Docker setup supports applying custom mods and patches to address specific model compatibility issues or apply experimental features. This functionality is primarily managed through the `--apply-mod` option in the cluster launch script, and `run-recipe.sh` can pass additional `--apply-mod` flags through to `launch-cluster.sh`.
 
 ### Available Mods
 
@@ -1327,10 +1527,13 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **fix-qwen3.5-autoround/**, **fix-qwen3-next-autoround/**, and **fix-qwen35-tp4-marlin/**: Model-specific Qwen AutoRound and Marlin compatibility fixes.
 - **fix-qwen3-coder-next/**: Qwen3-Coder-Next runtime and performance fixes.
 - **gpu-mem-util-gb/**: Adds experimental `--gpu-memory-utilization-gb` support.
+- **kv-cache-prealloc-cleanup/**: Clears cached CUDA allocator memory immediately before KV cache allocation.
+- **uma-fix/**: Uses CUDA/NVML memory accounting under WSL and skips host-memory UMA accounting there.
 - **drop-caches/**: Periodically clears filesystem caches for large models running near the memory limit.
+- **diffusiongemma/**: Adds DiffusionGemma support, dynamic causal attention compatibility, and Gemma4 reasoning/content-channel fixes used by the DiffusionGemma recipes.
 - **nemotron-nano/** and **nemotron-super/**: Nemotron reasoning parser and model support helpers.
 - **exp-b12x/**: Experimental FlashInfer b12x support for builds that include the required upstream vLLM support.
-- **use-official-vllm/**: Installs `git` inside official vLLM containers (Ubuntu/Debian-based) so that other mods that rely on `git apply` work correctly. Apply this mod first when using containers that do not ship `git` (e.g. `vllm-openai`).
+- **use-official-vllm/**: Installs `git` inside official vLLM containers (Ubuntu/Debian-based) so that other mods that rely on `git apply` work correctly, and redirects the pip-installed NCCL library to the system `libnccl2` library to avoid DGX Spark multi-node NCCL hangs. Apply this mod first when using official vLLM images (e.g. `vllm-openai`).
 
 Each mod directory typically contains:
 - Patch files (`.patch`) for code modifications and/or other assets.
@@ -1350,6 +1553,12 @@ You can apply multiple mods by specifying additional `--apply-mod` flags:
 
 ```bash
 ./launch-cluster.sh --apply-mod ./mods/fix-Salyut1-GLM-4.7-NVFP4 --apply-mod ./mods/other-mod
+```
+
+When using recipes, any mods listed in the recipe are applied first, followed by mods supplied on the command line:
+
+```bash
+./run-recipe.sh glm-4.7-flash-awq --solo --apply-mod ./mods/other-mod
 ```
 
 ### Creating Custom Mods
