@@ -85,6 +85,7 @@ RELATED FILES:
 
 import argparse
 import os
+import re
 import subprocess
 import shlex
 import sys
@@ -106,6 +107,27 @@ BUILD_SCRIPT = SCRIPT_DIR / "build-and-copy.sh"
 DOWNLOAD_SCRIPT = SCRIPT_DIR / "hf-download.sh"
 AUTODISCOVER_SCRIPT = SCRIPT_DIR / "autodiscover.sh"
 ENV_FILE = None  # Will be set from CLI argument or default
+DISTRIBUTED_EXECUTOR_RE = re.compile(
+    r"--distributed-executor-backend(?:=|\s+)\S+"
+)
+
+
+def strip_distributed_executor_backend(command: str) -> str:
+    """Remove vLLM distributed executor backend flags from a command."""
+    command = DISTRIBUTED_EXECUTOR_RE.sub("", command)
+    lines = command.split("\n")
+    filtered_lines = [line for line in lines if line.strip() not in ("", "\\")]
+    return "\n".join(filtered_lines)
+
+
+def ensure_ray_backend(command: str) -> str:
+    """Append the Ray executor backend for vLLM serve commands that omit it."""
+    if "vllm serve" not in command:
+        return command
+    if DISTRIBUTED_EXECUTOR_RE.search(command):
+        return command
+    return command.rstrip() + " --distributed-executor-backend ray"
+
 
 
 def load_recipe(recipe_path: Path) -> dict[str, Any]:
@@ -411,7 +433,7 @@ def generate_launch_script(
     overrides: dict[str, Any],
     is_solo: bool = False,
     extra_args: list[str] | None = None,
-    no_ray: bool = False,
+    use_ray: bool = False,
 ) -> str:
     """
     Generate a bash launch script from the recipe.
@@ -433,9 +455,13 @@ def generate_launch_script(
         max_model_len: Maximum sequence length
         (custom variables can be added via recipe defaults)
 
-    SOLO MODE BEHAVIOR:
-        - Removes '--distributed-executor-backend ray' lines
+    SOLO BEHAVIOR:
+        - Strips distributed executor configuration
         - Typically sets tensor_parallel=1 (handled by caller)
+
+    MULTI-NODE BACKEND BEHAVIOR:
+        - No-Ray is the default
+        - --ray preserves or adds Ray distributed executor configuration
 
     EXTRA ARGS:
         - Appended verbatim to the end of the vLLM command
@@ -445,8 +471,9 @@ def generate_launch_script(
     Args:
         recipe: Loaded recipe dictionary
         overrides: CLI-provided parameter overrides (take precedence over defaults)
-        is_solo: If True, strip distributed executor configuration
+        is_solo: If True, generate a single-node launch script
         extra_args: Additional arguments to append to vLLM command (after --)
+        use_ray: If True, preserve/add Ray distributed executor configuration
 
     Returns:
         Complete bash script content as string
@@ -477,19 +504,7 @@ def generate_launch_script(
         print(f"Available parameters: {list(params.keys())}")
         sys.exit(1)
 
-    # In solo or no-ray mode, remove --distributed-executor-backend
-    # (not needed for solo; no-ray uses PyTorch distributed instead)
-    if is_solo or no_ray:
-        import re
-
-        # Remove just the flag and its value, not the whole line
-        command = re.sub(r"--distributed-executor-backend\s+\S+", "", command)
-        # Remove lines that are now empty or just a backslash continuation
-        lines_list = command.split("\n")
-        filtered_lines = [line for line in lines_list if line.strip() not in ("", "\\")]
-        command = "\n".join(filtered_lines)
-
-    # Remove trailing backslash if present
+    # Remove trailing backslash if present before appending extra args.
     command = command.rstrip()
     if command.endswith("\\"):
         command = command.rstrip("\\\n").rstrip()
@@ -499,6 +514,12 @@ def generate_launch_script(
         # Join extra args and append to command
         extra_args_str = " ".join(shlex.quote(a) for a in extra_args)
         command = command + " " + extra_args_str
+
+    # Normalize distributed backend after CLI passthrough. No-Ray is default.
+    if is_solo or not use_ray:
+        command = strip_distributed_executor_backend(command)
+    else:
+        command = ensure_ray_backend(command)
 
     lines.append("# Run the model")
     lines.append(command.strip())
@@ -804,11 +825,18 @@ Examples:
         metavar="HOST:CONTAINER",
         help="Publish a container port in solo mode, e.g. -p 8000:8000. Can be used multiple times.",
     )
-    launch_group.add_argument(
+    backend_group = launch_group.add_mutually_exclusive_group()
+    backend_group.add_argument(
+        "--ray",
+        action="store_true",
+        dest="ray",
+        help="Use Ray for multi-node vLLM and ensure --distributed-executor-backend ray is present",
+    )
+    backend_group.add_argument(
         "--no-ray",
         action="store_true",
         dest="no_ray",
-        help="No-Ray mode: run multi-node vLLM without Ray (uses PyTorch distributed backend)",
+        help="Default for multi-node vLLM without Ray (accepted for compatibility)",
     )
     launch_group.add_argument(
         "--master-port",
@@ -1012,11 +1040,19 @@ Examples:
     solo_only = recipe.get("solo_only", False)
     is_solo = args.solo or not is_cluster
 
-    if getattr(args, "no_ray", False) and is_solo:
-        print(
-            "Error: --no-ray is incompatible with --solo. Solo mode already runs without Ray."
-        )
-        return 1
+    use_ray = getattr(args, "ray", False) and not is_solo
+
+    if is_solo:
+        explicit_backend_flag = None
+        if getattr(args, "ray", False):
+            explicit_backend_flag = "--ray"
+        elif getattr(args, "no_ray", False):
+            explicit_backend_flag = "--no-ray"
+        if explicit_backend_flag:
+            print(
+                f"Error: {explicit_backend_flag} is incompatible with --solo or a single-node configuration."
+            )
+            return 1
 
     if cluster_only and is_solo:
         print(f"Error: Recipe '{recipe['name']}' requires cluster mode.")
@@ -1075,6 +1111,8 @@ Examples:
             if worker_nodes:
                 print(f"  Workers: {', '.join(worker_nodes)}")
         print(f"Solo mode: {is_solo}")
+        if is_cluster:
+            print(f"Ray mode: {use_ray}")
         if eth_if:
             print(
                 f"Ethernet interface: {eth_if}{' (from .env)' if not args.eth_if else ''}"
@@ -1227,7 +1265,7 @@ Examples:
         overrides,
         is_solo=is_solo,
         extra_args=extra_args,
-        no_ray=getattr(args, "no_ray", False),
+        use_ray=use_ray,
     )
 
     if args.dry_run:
@@ -1249,7 +1287,9 @@ Examples:
             cmd_parts.append("--solo")
         if args.daemon:
             cmd_parts.append("-d")
-        if getattr(args, "no_ray", False):
+        if use_ray:
+            cmd_parts.append("--ray")
+        elif getattr(args, "no_ray", False):
             cmd_parts.append("--no-ray")
         if nodes:
             cmd_parts.extend(["-n", ",".join(nodes)])
@@ -1326,7 +1366,9 @@ Examples:
         if args.daemon:
             cmd.append("-d")
 
-        if getattr(args, "no_ray", False):
+        if use_ray:
+            cmd.append("--ray")
+        elif getattr(args, "no_ray", False):
             cmd.append("--no-ray")
 
         # Pass nodes to launch-cluster.sh (from command line, .env, or autodiscover)
