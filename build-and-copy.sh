@@ -98,6 +98,15 @@ add_copy_hosts() {
     done
 }
 
+# Convert --gpu-arch value (e.g. 12.0, 12.0f, 12.1a) to NCCL NVCC_GENCODE format.
+gpu_arch_to_nccl_gencode() {
+    local arch="$1"
+    # Strip optional feature suffix (12.1a -> 12.1, 12.0f -> 12.0).
+    arch="${arch%[a-z]}"
+    local sm="${arch//./}"
+    echo "-gencode=arch=compute_${sm},code=sm_${sm}"
+}
+
 get_remote_image_id() {
     local host="$1"
     local image="$2"
@@ -382,8 +391,8 @@ if match:
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "  -t, --tag <tag>               : Local image tag (default: 'vllm-node', 'vllm-node-tf5' with --tf5, 'vllm-node-mxfp4' with --exp-mxfp4)"
-    echo "  --use-wheels                  : Build runner image from prebuilt or local wheels instead of pulling ${PREBUILT_RUNNER_IMAGE}"
-    echo "  --gpu-arch <arch>             : GPU architecture for wheel/source builds (default: '${DEFAULT_GPU_ARCH_LIST}')"
+    echo "  --use-wheels                  : Build only the runner from precompiled wheels; never implicitly build source."
+    echo "  --gpu-arch <arch>             : GPU architecture for NCCL, wheel, and source builds (default: '${DEFAULT_GPU_ARCH_LIST}')"
     echo "  --rebuild-flashinfer          : Force rebuild of FlashInfer wheels (ignore cached wheels)"
     echo "  --rebuild-vllm                : Force rebuild of vLLM wheels (ignore cached wheels)"
     echo "  --force-flashinfer-download   : Force download of FlashInfer wheels (skip cached wheel checks)"
@@ -399,7 +408,7 @@ usage() {
     echo "  --tf5                         : Deprecated compatibility flag; tag defaults to 'vllm-node-tf5' (aliases: --pre-tf, --pre-transformers)"
     echo "  --exp-mxfp4, --experimental-mxfp4 : Build with experimental native MXFP4 support"
     echo "  --apply-vllm-pr <pr-num>      : Apply a specific PR patch to vLLM source. Can be specified multiple times."
-    echo "  --apply-preset-vllm-prs       : Also apply Dockerfile preset vLLM PRs when --apply-vllm-pr is specified."
+    echo "  --apply-preset-vllm-prs       : Apply preset vLLM PRs even with --vllm-ref or --apply-vllm-pr."
     echo "  --apply-flashinfer-pr <pr-num>: Apply a specific PR patch to FlashInfer source. Can be specified multiple times."
     echo "  --full-log                    : Enable full build logging (--progress=plain)"
     echo "  --no-build                    : Skip building, only copy image (requires --copy-to)"
@@ -568,6 +577,12 @@ fi
 
 # Select image preparation path. By default, use the tested nightly runner image.
 # Flags that materially change image contents keep the existing local build path.
+VLLM_PR_APPLICATION_REQUESTED=false
+if [ -n "$VLLM_PRS" ] || [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
+    VLLM_PR_APPLICATION_REQUESTED=true
+    REBUILD_VLLM=true
+fi
+
 CUSTOM_BUILD_REQUESTED=false
 if [ "$EXP_MXFP4" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
 if [ "$GPU_ARCH_SET" = true ] && [ "$GPU_ARCH_LIST" != "$DEFAULT_GPU_ARCH_LIST" ]; then CUSTOM_BUILD_REQUESTED=true; fi
@@ -621,6 +636,8 @@ fi
 COMMON_BUILD_FLAGS+=("--build-arg" "BUILD_JOBS=$BUILD_JOBS")
 COMMON_BUILD_FLAGS+=("--build-arg" "TORCH_CUDA_ARCH_LIST=$GPU_ARCH_LIST")
 COMMON_BUILD_FLAGS+=("--build-arg" "FLASHINFER_CUDA_ARCH_LIST=$GPU_ARCH_LIST")
+NCCL_NVCC_GENCODE="$(gpu_arch_to_nccl_gencode "$GPU_ARCH_LIST")"
+COMMON_BUILD_FLAGS+=("--build-arg" "NCCL_NVCC_GENCODE=$NCCL_NVCC_GENCODE")
 if [ -n "$NETWORK_ARG" ]; then
     COMMON_BUILD_FLAGS+=("--network" "$NETWORK_ARG")
 fi
@@ -693,8 +710,9 @@ if [ "$NO_BUILD" = false ]; then
         elif compgen -G "./wheels/flashinfer*.whl" > /dev/null 2>&1; then
             echo "Download failed — using existing local FlashInfer wheels."
         else
-            echo "No FlashInfer wheels available (download failed) — building..."
-            BUILD_FLASHINFER=true
+            echo "Error: No precompiled FlashInfer wheels are available and the download failed."
+            echo "       Re-run with --rebuild-flashinfer to explicitly build FlashInfer from source."
+            exit 1
         fi
 
         if [ "$BUILD_FLASHINFER" = true ]; then
@@ -739,18 +757,20 @@ if [ "$NO_BUILD" = false ]; then
         # ----------------------------------------------------------
         # Phase 2: vLLM wheels
         # ----------------------------------------------------------
-        if [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
+        if [ "$VLLM_REF_SET" = true ] || [ "$VLLM_PR_APPLICATION_REQUESTED" = true ]; then
             REBUILD_VLLM=true
         fi
 
         BUILD_VLLM=false
         if [ "$REBUILD_VLLM" = true ]; then
-            if [ "$VLLM_REF_SET" = true ] && [ -n "$VLLM_PRS" ]; then
-                echo "Rebuilding vLLM wheels (--vllm-ref and --apply-vllm-pr specified)..."
+            if [ "$VLLM_REF_SET" = true ] && [ "$VLLM_PR_APPLICATION_REQUESTED" = true ]; then
+                echo "Rebuilding vLLM wheels (applying vLLM PRs to --vllm-ref $VLLM_REF)..."
             elif [ "$VLLM_REF_SET" = true ]; then
                 echo "Rebuilding vLLM wheels (--vllm-ref specified)..."
             elif [ -n "$VLLM_PRS" ]; then
                 echo "Rebuilding vLLM wheels (--apply-vllm-pr specified)..."
+            elif [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
+                echo "Rebuilding vLLM wheels (--apply-preset-vllm-prs specified)..."
             else
                 echo "Rebuilding vLLM wheels (--rebuild-vllm specified)..."
             fi
@@ -760,8 +780,9 @@ if [ "$NO_BUILD" = false ]; then
         elif compgen -G "./wheels/vllm*.whl" > /dev/null 2>&1; then
             echo "Download failed — using existing local vLLM wheels."
         else
-            echo "No vLLM wheels available (download failed) — building..."
-            BUILD_VLLM=true
+            echo "Error: No precompiled vLLM wheels are available and the download failed."
+            echo "       Re-run with --rebuild-vllm to explicitly build vLLM from source."
+            exit 1
         fi
 
         if [ "$BUILD_VLLM" = true ]; then
@@ -778,6 +799,17 @@ if [ "$NO_BUILD" = false ]; then
                 "${COMMON_BUILD_FLAGS[@]}"
                 "--build-arg" "VLLM_REF=$VLLM_REF")
 
+            if [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
+                echo "Applying preset vLLM PRs from the Dockerfile (explicitly requested)."
+                VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=1")
+            elif [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
+                echo "Skipping preset vLLM PRs because --vllm-ref or --apply-vllm-pr was specified."
+                VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=0")
+            else
+                echo "Applying preset vLLM PRs from the Dockerfile by default."
+                VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=1")
+            fi
+
             if [ "$REBUILD_VLLM" = true ]; then
                 VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$(date +%s)")
             fi
@@ -785,13 +817,6 @@ if [ "$NO_BUILD" = false ]; then
             if [ -n "$VLLM_PRS" ]; then
                 echo "Applying vLLM PRs: $VLLM_PRS"
                 VLLM_CMD+=("--build-arg" "VLLM_PRS=$VLLM_PRS")
-                if [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
-                    echo "Also applying preset vLLM PRs from the Dockerfile."
-                    VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=1")
-                else
-                    echo "Skipping preset vLLM PRs because --apply-vllm-pr was specified."
-                    VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=0")
-                fi
             fi
 
             VLLM_CMD+=(".")
