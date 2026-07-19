@@ -21,15 +21,17 @@ jobs:
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           
-          # IMPORTANT: Update this URL to the original repository's URL
           UPSTREAM_URL="https://github.com/eugr/spark-vllm-docker.git"
           
           git remote add upstream "$UPSTREAM_URL"
           git fetch upstream main
           git checkout main
           
-          # Attempt a fast-forward merge. 
-          # This will succeed if you haven't made any commits to your main branch.
-          git merge upstream/main --no-edit
+          git merge upstream/main --no-edit --no-commit --no-ff
+          
+          git checkout HEAD -- .github/workflows/
+          git clean -fd .github/workflows/
+          
+          git commit -m "Sync upstream/main"
           
           git push origin main

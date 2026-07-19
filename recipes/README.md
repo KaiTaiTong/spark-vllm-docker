@@ -121,7 +121,6 @@ description: What this recipe does
 model: org/model-name              # HuggingFace model ID for --setup downloads
 cluster_only: false                # Set to true if model requires cluster mode
 build_args:                        # Extra args for build-and-copy.sh
-  - --pre-tf                       # e.g., for transformers 5.0
   - --exp-mxfp4                    # e.g., for MXFP4 Dockerfile
 mods:
   - mods/some-patch
@@ -141,9 +140,8 @@ The `build_args` field passes flags to `build-and-copy.sh`:
 
 | Flag | Description |
 |------|-------------|
-| `--pre-tf` | Use transformers 5.0 (required for GLM-4.7 models) |
 | `--exp-mxfp4` | Use MXFP4 Dockerfile (for MXFP4 quantized models) |
-| `--use-wheels` | Use pre-built wheels instead of building from source |
+| `--use-wheels` | Build the runner image from prebuilt or local wheels instead of pulling `eugr/spark-vllm:latest` |
 
 ### Parameter Substitution
 
@@ -191,7 +189,8 @@ Setup options:
 
 Launch options:
   --solo                      Run in solo mode (single node, no Ray)
-  --no-ray                    Multi-node without Ray (PyTorch distributed backend)
+  --ray                       Opt into Ray for multi-node vLLM
+  --no-ray                    Default multi-node no-Ray mode (accepted for compatibility)
   -n, --nodes IPS             Comma-separated node IPs (first = head)
   -d, --daemon                Run in daemon mode
   -t, --container IMAGE       Override container from recipe
@@ -259,10 +258,9 @@ Example:
 ```yaml
 name: My Model
 description: My custom model setup
-container: vllm-node-tf5
+container: vllm-node
 
-build_args:
-  - --pre-tf
+# New recipes should use the default vllm-node image and omit legacy TF5 build args.
 
 mods:
   - mods/my-fix

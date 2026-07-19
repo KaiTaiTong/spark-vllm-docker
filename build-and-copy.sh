@@ -7,6 +7,8 @@ START_TIME=$(date +%s)
 # Default values
 IMAGE_TAG="vllm-node"
 IMAGE_TAG_SET=false
+PREBUILT_RUNNER_IMAGE="eugr/spark-vllm:latest"
+USE_WHEELS=false
 REBUILD_FLASHINFER=false
 REBUILD_VLLM=false
 FORCE_FLASHINFER_DOWNLOAD=false
@@ -25,10 +27,14 @@ EXP_MXFP4=false
 VLLM_PRS=""
 APPLY_PRESET_VLLM_PRS=false
 FLASHINFER_PRS=""
+# Deprecated --tf5 aliases are kept for tag compatibility only; they no longer alter dependency resolution.
 PRE_TRANSFORMERS=false
 FULL_LOG=false
 BUILD_JOBS="16"
-GPU_ARCH_LIST="12.1a"
+BUILD_JOBS_SET=false
+DEFAULT_GPU_ARCH_LIST="12.1a"
+GPU_ARCH_LIST="$DEFAULT_GPU_ARCH_LIST"
+GPU_ARCH_SET=false
 NETWORK_ARG=""
 WHEELS_REPO="eugr/spark-vllm-docker"
 FLASHINFER_RELEASE_TAG="prebuilt-flashinfer-current"
@@ -54,7 +60,7 @@ generate_build_metadata() {
     local vllm_commit="$3"
     local flashinfer_commit="$4"
     local vllm_ref="$5"
-    local pre_transformers="$6"
+    local transformers_5="$6"
     local exp_mxfp4="$7"
     local vllm_prs="$8"
 
@@ -71,7 +77,7 @@ gpu_arch: ${GPU_ARCH_LIST}
 base_image: ${base_image:-unknown}
 build_args:
   vllm_ref: ${vllm_ref}
-  transformers_5: ${pre_transformers}
+  transformers_5: ${transformers_5}
   exp_mxfp4: ${exp_mxfp4}
   vllm_prs: "${vllm_prs}"
   build_jobs: ${BUILD_JOBS}
@@ -90,6 +96,12 @@ add_copy_hosts() {
             fi
         done
     done
+}
+
+get_remote_image_id() {
+    local host="$1"
+    local image="$2"
+    ssh "${SSH_USER}@${host}" "docker image inspect --format '{{.Id}}' ${image}" 2>/dev/null
 }
 
 copy_to_host() {
@@ -369,8 +381,9 @@ if match:
 # Help function
 usage() {
     echo "Usage: $0 [OPTIONS]"
-    echo "  -t, --tag <tag>               : Image tag (default: 'vllm-node', 'vllm-node-tf5' with --tf5, 'vllm-node-mxfp4' with --exp-mxfp4)"
-    echo "  --gpu-arch <arch>             : GPU architecture (default: '12.1a')"
+    echo "  -t, --tag <tag>               : Local image tag (default: 'vllm-node', 'vllm-node-tf5' with --tf5, 'vllm-node-mxfp4' with --exp-mxfp4)"
+    echo "  --use-wheels                  : Build runner image from prebuilt or local wheels instead of pulling ${PREBUILT_RUNNER_IMAGE}"
+    echo "  --gpu-arch <arch>             : GPU architecture for wheel/source builds (default: '${DEFAULT_GPU_ARCH_LIST}')"
     echo "  --rebuild-flashinfer          : Force rebuild of FlashInfer wheels (ignore cached wheels)"
     echo "  --rebuild-vllm                : Force rebuild of vLLM wheels (ignore cached wheels)"
     echo "  --force-flashinfer-download   : Force download of FlashInfer wheels (skip cached wheel checks)"
@@ -378,12 +391,12 @@ usage() {
     echo "  --force-download              : Force download of all prebuilt wheels (skip cached wheel checks)"
     echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main')"
     echo "  --flashinfer-ref <ref>        : FlashInfer commit SHA, branch or tag (default: 'main')"
-    echo "  -c, --copy-to <hosts>         : Host(s) to copy the image to. Accepts comma or space-delimited lists."
+    echo "  -c, --copy-to <hosts>         : Host(s) to copy image to. Accepts comma or space-delimited lists; matching remote image IDs are skipped."
     echo "      --copy-to-host            : Alias for --copy-to (backwards compatibility)."
     echo "      --copy-parallel           : Copy to all hosts in parallel instead of serially."
     echo "  -j, --build-jobs <jobs>       : Number of concurrent build jobs (default: ${BUILD_JOBS})"
     echo "  -u, --user <user>             : Username for ssh command (default: \$USER)"
-    echo "  --tf5                         : Install transformers>=5 (aliases: --pre-tf, --pre-transformers)"
+    echo "  --tf5                         : Deprecated compatibility flag; tag defaults to 'vllm-node-tf5' (aliases: --pre-tf, --pre-transformers)"
     echo "  --exp-mxfp4, --experimental-mxfp4 : Build with experimental native MXFP4 support"
     echo "  --apply-vllm-pr <pr-num>      : Apply a specific PR patch to vLLM source. Can be specified multiple times."
     echo "  --apply-preset-vllm-prs       : Also apply Dockerfile preset vLLM PRs when --apply-vllm-pr is specified."
@@ -403,7 +416,8 @@ CONFIG_FILE_SET=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -t|--tag) IMAGE_TAG="$2"; IMAGE_TAG_SET=true; shift ;;
-        --gpu-arch) GPU_ARCH_LIST="$2"; shift ;;
+        --use-wheels) USE_WHEELS=true ;;
+        --gpu-arch) GPU_ARCH_LIST="$2"; GPU_ARCH_SET=true; shift ;;
         --rebuild-flashinfer) REBUILD_FLASHINFER=true ;;
         --rebuild-vllm) REBUILD_VLLM=true ;;
         --force-flashinfer-download) FORCE_FLASHINFER_DOWNLOAD=true ;;
@@ -423,7 +437,7 @@ while [[ "$#" -gt 0 ]]; do
             done
             continue
             ;;
-        -j|--build-jobs) BUILD_JOBS="$2"; shift ;;
+        -j|--build-jobs) BUILD_JOBS="$2"; BUILD_JOBS_SET=true; shift ;;
         -u|--user) SSH_USER="$2"; shift ;;
         --copy-parallel) PARALLEL_COPY=true ;;
         --tf5|--pre-tf|--pre-transformers) PRE_TRANSFORMERS=true ;;
@@ -482,6 +496,11 @@ if [ "$IMAGE_TAG_SET" = false ]; then
     elif [ "$EXP_MXFP4" = true ]; then
         IMAGE_TAG="vllm-node-mxfp4"
     fi
+fi
+
+if [ "$PRE_TRANSFORMERS" = true ]; then
+    echo "Warning: --tf5/--pre-tf/--pre-transformers is deprecated; vLLM now uses Transformers v5 by default."
+    echo "         No Transformers override will be applied; image tag remains $IMAGE_TAG."
 fi
 
 # Source autodiscover.sh to load .env file
@@ -547,6 +566,26 @@ if [ "$NO_BUILD" = true ] && [ "${#COPY_HOSTS[@]}" -eq 0 ]; then
     exit 1
 fi
 
+# Select image preparation path. By default, use the tested nightly runner image.
+# Flags that materially change image contents keep the existing local build path.
+CUSTOM_BUILD_REQUESTED=false
+if [ "$EXP_MXFP4" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$GPU_ARCH_SET" = true ] && [ "$GPU_ARCH_LIST" != "$DEFAULT_GPU_ARCH_LIST" ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$VLLM_REF_SET" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$FLASHINFER_REF_SET" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$REBUILD_FLASHINFER" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$REBUILD_VLLM" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$FORCE_FLASHINFER_DOWNLOAD" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$FORCE_VLLM_DOWNLOAD" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ -n "$VLLM_PRS" ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ "$APPLY_PRESET_VLLM_PRS" = true ]; then CUSTOM_BUILD_REQUESTED=true; fi
+if [ -n "$FLASHINFER_PRS" ]; then CUSTOM_BUILD_REQUESTED=true; fi
+
+USE_PREBUILT_IMAGE=false
+if [ "$NO_BUILD" = false ] && [ "$USE_WHEELS" = false ] && [ "$CUSTOM_BUILD_REQUESTED" = false ]; then
+    USE_PREBUILT_IMAGE=true
+fi
+
 # Handle cleanup mode
 if [[ "$CLEANUP_MODE" == "true" ]]; then
     WHEELS_DIR="./wheels"
@@ -587,14 +626,34 @@ if [ -n "$NETWORK_ARG" ]; then
 fi
 
 # =====================================================
-# Build image (unless --no-build or --exp-mxfp4)
+# Prepare image (unless --no-build)
 # =====================================================
 FLASHINFER_BUILD_TIME=0
 VLLM_BUILD_TIME=0
 RUNNER_BUILD_TIME=0
+PREBUILT_PULL_TIME=0
 
 if [ "$NO_BUILD" = false ]; then
-    if [ "$EXP_MXFP4" = true ]; then
+    if [ "$USE_PREBUILT_IMAGE" = true ]; then
+        echo "Using prebuilt runner image ${PREBUILT_RUNNER_IMAGE}..."
+        if [ -n "$NETWORK_ARG" ]; then
+            echo "Warning: --network is only used for Docker builds; ignoring it while pulling ${PREBUILT_RUNNER_IMAGE}."
+        fi
+        if [ "$FULL_LOG" = true ]; then
+            echo "Warning: --full-log is only used for Docker builds; ignoring it while pulling ${PREBUILT_RUNNER_IMAGE}."
+        fi
+        if [ "$BUILD_JOBS_SET" = true ]; then
+            echo "Warning: --build-jobs is only used for Docker builds; ignoring it while pulling ${PREBUILT_RUNNER_IMAGE}."
+        fi
+
+        PULL_START=$(date +%s)
+        docker pull "$PREBUILT_RUNNER_IMAGE"
+        if [ "$IMAGE_TAG" != "$PREBUILT_RUNNER_IMAGE" ]; then
+            docker tag "$PREBUILT_RUNNER_IMAGE" "$IMAGE_TAG"
+        fi
+        PULL_END=$(date +%s)
+        PREBUILT_PULL_TIME=$((PULL_END - PULL_START))
+    elif [ "$EXP_MXFP4" = true ]; then
         echo "Building with experimental MXFP4 support..."
 
         # Generate build metadata YAML for mxfp4 build
@@ -766,16 +825,11 @@ if [ "$NO_BUILD" = false ]; then
         FLASHINFER_COMMIT=""
         [ -f "./wheels/.flashinfer-commit" ] && FLASHINFER_COMMIT=$(cat ./wheels/.flashinfer-commit)
         generate_build_metadata Dockerfile "$VLLM_VERSION" "$VLLM_COMMIT" "$FLASHINFER_COMMIT" \
-            "$VLLM_REF" "$PRE_TRANSFORMERS" "false" "$VLLM_PRS"
+            "$VLLM_REF" "true" "false" "$VLLM_PRS"
 
         RUNNER_CMD=("docker" "build"
             "-t" "$IMAGE_TAG"
             "${COMMON_BUILD_FLAGS[@]}")
-
-        if [ "$PRE_TRANSFORMERS" = true ]; then
-            echo "Using transformers>=5.0.0..."
-            RUNNER_CMD+=("--build-arg" "PRE_TRANSFORMERS=1")
-        fi
 
         RUNNER_CMD+=(".")
 
@@ -794,41 +848,69 @@ fi
 # =====================================================
 COPY_TIME=0
 if [ "${#COPY_HOSTS[@]}" -gt 0 ]; then
-    echo "Copying image '$IMAGE_TAG' to ${#COPY_HOSTS[@]} host(s): ${COPY_HOSTS[*]}"
-    if [ "$PARALLEL_COPY" = true ]; then
-        echo "Parallel copy enabled."
-    fi
+    echo "Checking image '$IMAGE_TAG' on ${#COPY_HOSTS[@]} host(s): ${COPY_HOSTS[*]}"
     COPY_START=$(date +%s)
 
-    TMP_IMAGE=$(mktemp -t vllm_image.XXXXXX)
-    echo "Saving image locally to $TMP_IMAGE..."
-    docker save -o "$TMP_IMAGE" "$IMAGE_TAG"
-
-    if [ "$PARALLEL_COPY" = true ]; then
-        PIDS=()
-        for host in "${COPY_HOSTS[@]}"; do
-            copy_to_host "$host" &
-            PIDS+=($!)
-        done
-        COPY_FAILURE=0
-        for pid in "${PIDS[@]}"; do
-            if ! wait "$pid"; then
-                COPY_FAILURE=1
-            fi
-        done
-        if [ "$COPY_FAILURE" -ne 0 ]; then
-            echo "One or more copies failed."
-            exit 1
-        fi
-    else
-        for host in "${COPY_HOSTS[@]}"; do
-            copy_to_host "$host"
-        done
+    if ! LOCAL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG"); then
+        echo "Error: Local image '$IMAGE_TAG' not found."
+        exit 1
     fi
 
-    COPY_END=$(date +%s)
-    COPY_TIME=$((COPY_END - COPY_START))
-    echo "Copy complete."
+    COPY_TARGETS=()
+    for host in "${COPY_HOSTS[@]}"; do
+        REMOTE_IMAGE_ID=$(get_remote_image_id "$host" "$IMAGE_TAG" || true)
+        if [ -n "$REMOTE_IMAGE_ID" ] && [ "$REMOTE_IMAGE_ID" = "$LOCAL_IMAGE_ID" ]; then
+            echo "Image '$IMAGE_TAG' is already up to date on ${SSH_USER}@${host}; skipping."
+        else
+            if [ -n "$REMOTE_IMAGE_ID" ]; then
+                echo "Image '$IMAGE_TAG' differs on ${SSH_USER}@${host}; will copy."
+            else
+                echo "Image '$IMAGE_TAG' not found on ${SSH_USER}@${host}; will copy."
+            fi
+            COPY_TARGETS+=("$host")
+        fi
+    done
+
+    if [ "${#COPY_TARGETS[@]}" -eq 0 ]; then
+        COPY_END=$(date +%s)
+        COPY_TIME=$((COPY_END - COPY_START))
+        echo "All remote images are up to date; skipping save/copy."
+    else
+        echo "Copying image '$IMAGE_TAG' to ${#COPY_TARGETS[@]} host(s): ${COPY_TARGETS[*]}"
+        if [ "$PARALLEL_COPY" = true ]; then
+            echo "Parallel copy enabled."
+        fi
+
+        TMP_IMAGE=$(mktemp -t vllm_image.XXXXXX)
+        echo "Saving image locally to $TMP_IMAGE..."
+        docker save -o "$TMP_IMAGE" "$IMAGE_TAG"
+
+        if [ "$PARALLEL_COPY" = true ]; then
+            PIDS=()
+            for host in "${COPY_TARGETS[@]}"; do
+                copy_to_host "$host" &
+                PIDS+=($!)
+            done
+            COPY_FAILURE=0
+            for pid in "${PIDS[@]}"; do
+                if ! wait "$pid"; then
+                    COPY_FAILURE=1
+                fi
+            done
+            if [ "$COPY_FAILURE" -ne 0 ]; then
+                echo "One or more copies failed."
+                exit 1
+            fi
+        else
+            for host in "${COPY_TARGETS[@]}"; do
+                copy_to_host "$host"
+            done
+        fi
+
+        COPY_END=$(date +%s)
+        COPY_TIME=$((COPY_END - COPY_START))
+        echo "Copy complete."
+    fi
 else
     echo "No host specified, skipping copy."
 fi
@@ -842,6 +924,9 @@ echo ""
 echo "========================================="
 echo "         TIMING STATISTICS"
 echo "========================================="
+if [ "$PREBUILT_PULL_TIME" -gt 0 ]; then
+    echo "Prebuilt Pull:    $(printf '%02d:%02d:%02d' $((PREBUILT_PULL_TIME/3600)) $((PREBUILT_PULL_TIME%3600/60)) $((PREBUILT_PULL_TIME%60)))"
+fi
 if [ "$FLASHINFER_BUILD_TIME" -gt 0 ]; then
     echo "FlashInfer Build: $(printf '%02d:%02d:%02d' $((FLASHINFER_BUILD_TIME/3600)) $((FLASHINFER_BUILD_TIME%3600/60)) $((FLASHINFER_BUILD_TIME%60)))"
 fi
@@ -856,4 +941,4 @@ if [ "$COPY_TIME" -gt 0 ]; then
 fi
 echo "Total Time:       $(printf '%02d:%02d:%02d' $((TOTAL_TIME/3600)) $((TOTAL_TIME%3600/60)) $((TOTAL_TIME%60)))"
 echo "========================================="
-echo "Done building $IMAGE_TAG."
+echo "Done preparing $IMAGE_TAG."
