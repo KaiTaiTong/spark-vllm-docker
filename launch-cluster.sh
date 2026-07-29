@@ -983,6 +983,53 @@ container_keepalive_command() {
     fi
 }
 
+# Verify that the selected image resolves to the same content-addressable image
+# ID on the head and every worker before starting any containers.
+verify_cluster_image_consistency() {
+    if [[ ${#PEER_NODES[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "Verifying Docker image consistency across cluster nodes..."
+
+    local head_image_id
+    if ! head_image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME" 2>/dev/null) || [[ -z "$head_image_id" ]]; then
+        echo "Error: Could not inspect image '$IMAGE_NAME' on head node ($HEAD_IP)."
+        echo "       Make sure the image exists and is accessible to the current user."
+        return 1
+    fi
+    echo "  [HEAD] $HEAD_IP: $head_image_id"
+
+    local inspect_cmd
+    printf -v inspect_cmd "docker image inspect --format '{{.Id}}' %q" "$IMAGE_NAME"
+
+    local worker
+    local worker_image_id
+    local image_error=false
+    for worker in "${PEER_NODES[@]}"; do
+        if ! worker_image_id=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$worker" "$inspect_cmd" 2>/dev/null) || [[ -z "$worker_image_id" ]]; then
+            echo "Error: Could not inspect image '$IMAGE_NAME' on worker node ($worker)."
+            echo "       The image may be missing or inaccessible to the remote user."
+            image_error=true
+        elif [[ "$worker_image_id" != "$head_image_id" ]]; then
+            echo "Error: Docker image mismatch on worker node ($worker):"
+            echo "       Head:   $head_image_id"
+            echo "       Worker: $worker_image_id"
+            image_error=true
+        else
+            echo "  [WORKER] $worker: $worker_image_id (match)"
+        fi
+    done
+
+    if [[ "$image_error" == "true" ]]; then
+        echo "Error: Cluster launch aborted because image '$IMAGE_NAME' is not in sync."
+        printf "       Sync it with: ./build-and-copy.sh --no-build -t %q --copy-to <worker-hosts>\n" "$IMAGE_NAME"
+        return 1
+    fi
+
+    echo "Docker image consistency check passed."
+}
+
 # Start Cluster Function
 start_cluster() {
     check_cluster_running
@@ -990,6 +1037,8 @@ start_cluster() {
     if [[ "$CLUSTER_WAS_RUNNING" == "true" ]]; then
         return
     fi
+
+    verify_cluster_image_consistency || exit 1
 
     # Build docker run arguments based on mode
     local docker_entrypoint_args=""
