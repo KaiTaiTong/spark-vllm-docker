@@ -29,7 +29,7 @@ This repository is not affiliated with NVIDIA or their subsidiaries. This is a c
 By default, `build-and-copy.sh` pulls the tested nightly runner image from DockerHub: `eugr/spark-vllm:latest`. Nightly images are built and tested on multiple models in both cluster and solo configuration before `latest` is advanced.
 We will expand the selection of models we test in the pipeline, but since vLLM is a rapidly developing platform, some things may break.
 
-If you want to build from precompiled vLLM and Flashinfer wheels instead, specify `--use-wheels`. To build the latest vLLM from the main branch, use `--rebuild-vllm`; to target a specific vLLM release or commit, set `--vllm-ref`.
+If you want to build only the runner from precompiled vLLM and FlashInfer wheels, specify `--use-wheels`. This option never falls back to compiling missing wheels: if a wheel cannot be downloaded or found locally, the command stops with an error. To build the latest vLLM from the main branch, use `--rebuild-vllm`; to target a specific vLLM release or commit, set `--vllm-ref`.
 
 Similarly, `--rebuild-flashinfer`, `--flashinfer-ref`, and `--apply-flashinfer-pr` control the FlashInfer build and force the local build path.
 
@@ -66,7 +66,7 @@ The default image preparation speed depends mostly on your Internet connection a
 
 For slower internet connections it can be faster to build from the precompiled wheels by using `--use-wheels` parameter. An initial build speed depends on your Internet connection speed and whether the base image is already present on your machine. After base image pull, the build should take only 2-3 minutes.
 
-If `--use-wheels`, `--rebuild-vllm`, `--rebuild-flashinfer`, or another build customization is used, the script keeps the local wheel-based build path; full source rebuilds can take 20-40 minutes, but subsequent builds are faster.
+If `--use-wheels`, `--rebuild-vllm`, `--rebuild-flashinfer`, or another build customization is used, the script keeps the local wheel-based runner path. `--use-wheels` by itself only downloads or reuses precompiled wheels; source compilation occurs only for a dependency explicitly selected by a source-build flag. Full source rebuilds can take 20-40 minutes, but subsequent builds are faster.
 
 ### Run
 
@@ -146,6 +146,56 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-07-30
+
+#### Inkling Small NVFP4 support
+
+Added the support for
+`thinkingmachines/Inkling-Small-NVFP4`. It requires at least dual DGX Spark setup.
+
+```bash
+./run-recipe.sh inkling-small-nvfp4
+```
+
+Add `--setup` on the first run to prepare the container and download and
+distribute the model.
+
+#### Official vLLM earlyoom, InstantTensor, and SciPy support
+
+`mods/use-official-vllm` now installs `earlyoom`, InstantTensor, and SciPy in
+addition to the compatibility packages needed by other mods. This makes
+`launch-cluster.sh --earlyoom`, `--load-format instanttensor`, and SciPy-based
+functionality available when launching official vLLM images such as
+`vllm-openai`. The Python package install pins the image's existing Torch
+packages so the CUDA-enabled build is not replaced during dependency
+resolution.
+
+#### Repeatable Docker volume mappings
+
+`launch-cluster.sh` and `run-recipe.sh` now accept repeatable `-v` / `--volume` mappings using Docker's `local_path:container_path` syntax. In cluster mode, each mapping is applied to every launched node.
+
+```bash
+./launch-cluster.sh --solo \
+  -v "$PWD/models:/models" \
+  exec vllm serve /models/qwen3.6-35b-a4b-nvfp4 ...
+```
+
+### 2026-07-10
+
+#### Optional earlyoom monitor
+
+Runner images now include `earlyoom`, and `launch-cluster.sh --earlyoom` can run it as the container foreground process instead of `sleep infinity`. This keeps the existing launcher flow, where Ray and vLLM are started with `docker exec`, while allowing the container to monitor low host memory continuously. `run-recipe.py` and `run-recipe.sh` pass the same `--earlyoom` and `--earlyoom-args` options through to the launcher.
+
+The default policy is conservative and absolute-memory based: `-M 524288,102400 -s 100 -r 60`. That sends SIGTERM when available memory drops below 512 MiB, escalates to SIGKILL below 100 MiB, does not wait for swap to fill before acting, and prints one memory report per minute. You can override the default per launch with `--earlyoom-args` or set `VLLM_SPARK_EARLYOOM_ARGS`.
+
+#### Build and runtime compatibility updates
+
+`--gpu-arch` now also drives the NCCL `NVCC_GENCODE` build argument, so non-default local builds compile NCCL for the same target architecture as Torch and FlashInfer.
+
+The source-build KV-cache cleanup is now embedded directly in the Dockerfile, while `mods/kv-cache-prealloc-cleanup` keeps only the runtime policy tweaks.
+
+`mods/gpu-mem-util-gb` was refreshed against current vLLM memory profiling code so fixed-GiB GPU memory reservations continue to work with the newer startup path.
+
 ### 2026-07-02
 
 #### Prebuilt runner image by default
@@ -204,9 +254,9 @@ Added a Dockerfile-level workaround for a vLLM nightly regression where compress
 
 #### KV Cache Preallocation Cleanup Mod & Updated Qwen3.5-397B recipe for dual Sparks
 
-Added `mods/kv-cache-prealloc-cleanup`, which clears cached CUDA allocator memory immediately before vLLM allocates KV cache blocks. The dual-node Qwen3.5-397B INT4 AutoRound recipe now applies it after `mods/gpu-mem-util-gb` to reduce startup OOM risk from temporary CUDA graph/profile buffers on DGX Spark unified memory.
+Added KV cache preallocation cleanup for source-built vLLM wheels, which clears cached CUDA allocator memory before vLLM sizes and allocates KV cache blocks. The dual-node Qwen3.5-397B INT4 AutoRound recipe also applies `mods/kv-cache-prealloc-cleanup` after `mods/gpu-mem-util-gb` for its model-specific memory policy tweaks.
 
-The same recipe now keeps the 108 GiB startup reservation, sets `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, and uses a manual 2.25 GiB KV-cache allocation to bypass vLLM's conservative profiler-derived KV budget. The cleanup mod makes that setting skip CUDA graph memory profiling entirely, avoids profiling-only graph-pool residue before KV-cache sizing, and allows the fixed-GiB reservation argument to coexist with `--kv-cache-memory-bytes` for this model to load. This may result in a bit of swap to be used to offload unused resources, so make sure swap is enabled.
+The same recipe now keeps the 108 GiB startup reservation, sets `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, and uses a manual 2.25 GiB KV-cache allocation to bypass vLLM's conservative profiler-derived KV budget. The source build handles profiling-only graph-pool cleanup before KV-cache sizing, while the recipe mod makes the env var skip CUDA graph memory profiling entirely and allows the fixed-GiB reservation argument to coexist with `--kv-cache-memory-bytes` for this model to load. This may result in a bit of swap to be used to offload unused resources, so make sure swap is enabled.
 
 #### Added recipes for nvidia/Qwen3.6-35B-A3B-NVFP4
 
@@ -701,11 +751,11 @@ Improved the wheels availability check in `build-and-copy.sh` to be more reliabl
 
 #### Prebuilt vLLM Wheels via GitHub Releases
 
-`build-and-copy.sh` now automatically downloads prebuilt vLLM wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-vllm-current) before falling back to a local build — identical to the existing FlashInfer download mechanism. This eliminates the need to compile vLLM from source on first use.
+`build-and-copy.sh` automatically downloads prebuilt vLLM wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-vllm-current) for wheel-based runner builds. It does not implicitly fall back to a source build.
 
 The download logic mirrors the FlashInfer behaviour:
 - If prebuilt wheels are available and newer than any locally cached version, they are downloaded automatically.
-- If the download fails (e.g. no network, release not found, GPU arch not supported), the script falls back to building locally, or reuses existing local wheels if present.
+- If the download fails (e.g. no network, release not found, GPU arch not supported), the script reuses an existing local wheel when available; otherwise it exits and identifies the explicit source-build flag.
 - `--rebuild-vllm`, `--vllm-ref`, or `--apply-vllm-pr` skip the download entirely and force a local build.
 
 No new flags are required — the download happens transparently.
@@ -756,11 +806,11 @@ Changed reasoning parser in Minimax for better compatibility with modern clients
 
 #### Completely Redesigned Build Process
 
-`build-and-copy.sh` now automatically downloads prebuilt FlashInfer wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-flashinfer-current) before falling back to a local build. This eliminates the need to compile FlashInfer from source on first use, which typically takes around 20 minutes.
+`build-and-copy.sh` automatically downloads prebuilt FlashInfer wheels from the [GitHub releases](https://github.com/eugr/spark-vllm-docker/releases/tag/prebuilt-flashinfer-current) for wheel-based runner builds. It does not implicitly fall back to a source build.
 
 The download logic:
 - If prebuilt wheels are available and newer than any locally cached version, they are downloaded automatically.
-- If the download fails (e.g. no network, release not found, gpu arch is not compatible), the script falls back to building locally, or reuses existing local wheels if present.
+- If the download fails (e.g. no network, release not found, GPU arch is not compatible), the script reuses an existing local wheel when available; otherwise it exits and suggests `--rebuild-flashinfer`.
 - `--rebuild-flashinfer` skips the download entirely and forces a fresh local build.
 
 No new flags are required - the download happens transparently unless `--rebuild-flashinfer` is specified.
@@ -897,9 +947,9 @@ Thanks @raphaelamorim for the contribution!
 
 #### Ability to apply vLLM PRs during build
 
-`./build-and-copy.sh` now supports ability to apply vLLM PRs to builds. PR is applied to the most recent vLLM commit (or specific vllm-ref if set). This does NOT apply to wheels build and MXFP4 special build!
+`./build-and-copy.sh` now supports ability to apply vLLM PRs to builds. PR patches are applied to the selected vLLM ref (`--vllm-ref`, default `main`) without carrying the PR branch's original base history. This does NOT apply to MXFP4 special build!
 
-To use, just specify `--apply-vllm-pr <pr_num>` in the arguments. When custom vLLM PRs are specified, Dockerfile preset vLLM PRs are skipped unless `--apply-preset-vllm-prs` is also specified. Please note that it may fail depending on whether the PR needs a rebase for the specified vLLM reference/main branch. Use with caution!
+To use, just specify `--apply-vllm-pr <pr_num>` in the arguments. Dockerfile preset vLLM PRs are applied automatically for an ordinary `main` source build. Specifying either `--vllm-ref` or `--apply-vllm-pr` suppresses the preset PRs unless `--apply-preset-vllm-prs` is also specified; when enabled, both preset and requested PR patches are applied on top of the selected vLLM ref. Please note that a PR patch may fail if it does not apply cleanly to the selected ref. Use with caution!
 
 Example:
 
@@ -1198,7 +1248,7 @@ Building the container manually is no longer supported due to Dockerfile complex
 
 ### Using the Build Script
 
-The `build-and-copy.sh` script prepares the runner image and optionally copies it to one or more nodes. By default it pulls `eugr/spark-vllm:latest` and tags it locally; use `--use-wheels` or build customization flags when you need a local wheel/source build.
+The `build-and-copy.sh` script prepares the runner image and optionally copies it to one or more nodes. By default it pulls `eugr/spark-vllm:latest` and tags it locally. Use `--use-wheels` to build only the runner from downloaded or local precompiled wheels. Source compilation happens only when an explicit source-build flag such as `--rebuild-vllm`, `--vllm-ref`, `--apply-vllm-pr`, `--rebuild-flashinfer`, `--flashinfer-ref`, or `--apply-flashinfer-pr` is supplied.
 
 **Basic usage (prepare local image):**
 
@@ -1287,7 +1337,7 @@ Using a different username:
 | Flag | Description |
 | :--- | :--- |
 | `-t, --tag <tag>` | Local image tag (default: `vllm-node`; auto-set to `vllm-node-tf5` with `--tf5`, `vllm-node-mxfp4` with `--exp-mxfp4`) |
-| `--use-wheels` | Build the runner image from prebuilt or local wheels instead of pulling `eugr/spark-vllm:latest` |
+| `--use-wheels` | Build only the runner image from downloaded or local precompiled wheels; never implicitly compile missing wheels |
 | `--gpu-arch <arch>` | Target GPU architecture for wheel/source builds. The default `12.1a` still uses the prebuilt image unless another build-forcing flag is set. |
 | `--rebuild-flashinfer` | Skip prebuilt wheel download; force a fresh local FlashInfer build |
 | `--rebuild-vllm` | Force rebuild vLLM from source |
@@ -1297,7 +1347,7 @@ Using a different username:
 | `--vllm-ref <ref>` | vLLM commit SHA, branch or tag (default: `main`) |
 | `--flashinfer-ref <ref>` | FlashInfer commit SHA, branch or tag (default: `main`) |
 | `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during build. Can be specified multiple times. |
-| `--apply-preset-vllm-prs` | Also apply Dockerfile preset vLLM PRs when `--apply-vllm-pr` is specified. |
+| `--apply-preset-vllm-prs` | Apply preset vLLM PRs even when `--vllm-ref` or `--apply-vllm-pr` would otherwise suppress them |
 | `--apply-flashinfer-pr <pr-num>` | Apply a FlashInfer PR patch during build. Can be specified multiple times. |
 | `--tf5` | Deprecated compatibility flag; pulls/tags the prebuilt image as `vllm-node-tf5` unless another build-forcing flag is set. Aliases: `--pre-tf, --pre-transformers`. |
 | `--exp-mxfp4` | Build with experimental native MXFP4 support. Alias: `--experimental-mxfp4`. |
@@ -1343,19 +1393,22 @@ The `launch-cluster.sh` script simplifies the process of starting the cluster no
 This will:
 1.  Auto-detect the active InfiniBand and Ethernet interfaces.
 2.  Auto-detect the node IP.
-3.  Launch idle containers on the head and worker nodes.
-4.  Start the Ray cluster unless solo mode or `--no-ray` is selected.
+3.  Verify that the selected Docker image has the same content-addressable image ID on the head and every worker.
+4.  Launch idle containers on the head and worker nodes.
+5.  Start the Ray cluster unless solo mode or `--no-ray` is selected.
 
 Assumptions and limitations:
 
 - It assumes that you've already set up passwordless SSH access on all nodes. If not, follow NVIDIA's [Connect Two Sparks Playbook](https://build.nvidia.com/spark/connect-two-sparks/stacked-sparks). I recommend setting up static IPs in the configuration instead of automatically assigning them every time, but this script should work with automatically assigned addresses too.
 - By default, it assumes that the container image name is `vllm-node`. If it differs, you need to specify it with `-t <name>` parameter.
+- Before launching a multi-node cluster, it compares `docker image inspect` IDs for the selected image on the head and every active worker. The launch is aborted if an image is missing or any ID differs.
 - If both ConnectX **physical** ports are utilized, and both have IP addresses, it will use whatever interface it finds first. Use `--eth-if` to override.
 - It will ignore IPs associated with the 2nd "clone" of the physical interface. For instance, the outermost port on Spark has two logical Ethernet interfaces: `enp1s0f1np1` and `enP2p1s0f1np1`. Only `enp1s0f1np1` will be used. To override, use `--eth-if` parameter.
 - It assumes that the same physical interfaces are named the same on all nodes (IOW, enp1s0f1np1 refers to the same physical port on all nodes). If it's not the case, you will have to launch cluster nodes manually or modify the script.
 - It clears the Docker image entrypoint by default so images that define an entrypoint, such as `vllm-openai`, can still start as idle cluster containers before commands are executed. Use `--keep-entrypoint` to keep the image entrypoint.
 - In solo mode, `-p` / `--publish` can be used to publish ports in Docker format, for example `-p 8000:8000`. When port publishing is used, the launcher does not use host networking. Port publishing is not supported in cluster mode.
-- It mounts `~/.cache/huggingface`, `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton`, and `~/.tilelang` by default. Use `--no-cache-dirs` to skip the vLLM/FlashInfer/Triton/TileLang cache mounts. Add any other mounts with the `VLLM_SPARK_EXTRA_DOCKER_ARGS` environment variable, e.g. `VLLM_SPARK_EXTRA_DOCKER_ARGS="-v $HOME/my-data:/data" ./launch-cluster.sh ...`. Use `$HOME` instead of `~` because `~` will not expand when passed through the variable to Docker arguments.
+- It sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in each container by default to reduce allocator fragmentation on DGX Spark. Override it with `-e PYTORCH_CUDA_ALLOC_CONF=<value>` when needed.
+- It mounts `~/.cache/huggingface`, `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton`, and `~/.tilelang` by default. Use `--no-cache-dirs` to skip the vLLM/FlashInfer/Triton/TileLang cache mounts. Add other mounts with repeatable Docker-style `-v` / `--volume` options, e.g. `-v "$HOME/my-data:/data"`.
 
 
 **Start in daemon mode (background):**
@@ -1414,11 +1467,14 @@ You can override the auto-detected values if needed:
 | `--check-config` | Check configuration and auto-detection without launching. |
 | `--solo` | Solo mode: skip autodetection, launch only on current node, do not launch Ray cluster |
 | `-p, --publish` | Publish a container port in Docker format, for example `-p 8000:8000`. Solo mode only; replaces host networking. Can be used multiple times. |
+| `-v, --volume` | Map a volume in Docker format, for example `-v /local/path:/container/path`. Applies to every launched node and can be used multiple times. |
 | `--ray` | Opt into Ray for multi-node vLLM and add `--distributed-executor-backend ray` when missing. |
 | `--no-ray` | Default multi-node no-Ray mode; accepted for compatibility. |
 | `--master-port` / `--head-port` | Port for cluster coordination: Ray head port or PyTorch distributed master port (default: 29501). |
 | `--no-cache-dirs` | Do not mount default cache directories (~/.cache/vllm, ~/.cache/flashinfer, ~/.triton, ~/.tilelang). |
 | `--keep-entrypoint` | Keep the Docker image entrypoint instead of clearing it before launching the idle cluster container. |
+| `--earlyoom` | Run `earlyoom` as the container foreground process instead of `sleep infinity`. |
+| `--earlyoom-args` | Arguments passed to `earlyoom` (default: `-M 524288,102400 -s 100 -r 60`). Implies `--earlyoom`. |
 | `--launch-script` | Path to bash script to execute in the container (from examples/ directory or absolute path). If launch script is specified, action should be omitted. |
 | `-d` | Run in daemon mode (detached). |
 | `--non-privileged` | Run in non-privileged mode (removes `--privileged` and `--ipc=host`). |
@@ -1430,6 +1486,48 @@ You can override the auto-detected values if needed:
 | `--setup` | Force autodiscovery and save configuration to `.env` (even if `.env` already exists). |
 | `start \| stop \| status \| exec` | Action to perform. Use `start` for idle containers or `exec` to run a command. Not compatible with `--launch-script`. |
 | `command` | Command to execute inside the container (only for `exec` action). |
+
+### Early OOM Monitor
+
+The `--earlyoom` flag starts the idle container with `earlyoom` as PID 1 instead of `sleep infinity`, so it monitors memory while Ray and vLLM are launched with `docker exec`. This is optional; without `--earlyoom`, containers still use the plain idle command.
+
+Default policy:
+
+```bash
+earlyoom -M 524288,102400 -s 100 -r 60
+```
+
+What those arguments mean:
+
+- `-M 524288,102400`: send SIGTERM when available memory is below 524288 KiB (512 MiB), then SIGKILL when it is below 102400 KiB (100 MiB).
+- `-s 100`: do not wait for swap to fill before acting. Earlyoom normally requires both memory and swap to be below their thresholds; `-s 100` makes the swap threshold effectively satisfied so host RAM pressure is enough. Use a paired value such as `-s 70,50` if you want swap-free thresholds for TERM and KILL.
+- `-r 60`: print a memory report every 60 seconds. Use `-r 0` to disable periodic reports.
+
+Tune the policy per launch with `--earlyoom-args`:
+
+```bash
+./launch-cluster.sh --earlyoom \
+  --earlyoom-args "-M 1048576,262144 -s 70,50 -r 30" \
+  exec vllm serve ...
+```
+
+The same options pass through recipe launches:
+
+```bash
+./run-recipe.sh minimax-m2-awq --solo \
+  --earlyoom --earlyoom-args "-M 786432,196608 -s 100 -r 120"
+```
+
+You can also set the default arguments through the environment:
+
+```bash
+VLLM_SPARK_EARLYOOM_ARGS="-M 786432,196608 -s 100 -r 120" \
+  ./launch-cluster.sh --earlyoom exec vllm serve ...
+```
+
+Other useful upstream options include `--prefer REGEX` and `--avoid REGEX` to bias victim selection, `--dryrun` to log what would be killed without killing it, and `-g` to kill the selected process group instead of only the selected process. Keep custom argument values shell-safe because they are passed through the launcher as command arguments.
+
+`--earlyoom` is not compatible with `--keep-entrypoint`: the launcher must clear the image entrypoint so `earlyoom` can be the container foreground process.
 
 ### Non-Privileged Mode
 
@@ -1567,13 +1665,15 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **fix-qwen3.5-autoround/**, **fix-qwen3-next-autoround/**, and **fix-qwen35-tp4-marlin/**: Model-specific Qwen AutoRound and Marlin compatibility fixes.
 - **fix-qwen3-coder-next/**: Qwen3-Coder-Next runtime and performance fixes.
 - **gpu-mem-util-gb/**: Adds experimental `--gpu-memory-utilization-gb` support.
-- **kv-cache-prealloc-cleanup/**: Clears cached CUDA allocator memory immediately before KV cache allocation.
+- **kv-cache-prealloc-cleanup/**: Applies model-specific manual KV-cache startup tweaks: skip CUDA graph profiling when disabled by env and allow `--gpu-memory-utilization-gb` with `--kv-cache-memory-bytes`.
 - **uma-fix/**: Uses CUDA/NVML memory accounting under WSL and skips host-memory UMA accounting there.
 - **drop-caches/**: Periodically clears filesystem caches for large models running near the memory limit.
 - **diffusiongemma/**: Adds DiffusionGemma support, dynamic causal attention compatibility, and Gemma4 reasoning/content-channel fixes used by the DiffusionGemma recipes.
 - **nemotron-nano/** and **nemotron-super/**: Nemotron reasoning parser and model support helpers.
+- **inkling-sm12-paged-kv/**: Routes Inkling's SM12 paged-KV relative attention through a vendored FA4 implementation while leaving other models and GPU architectures unchanged.
+- **instanttensor-hybrid-draft-loader/**: Keeps a target model on InstantTensor while using lazy safetensors for eligible speculative draft weights, including embedded MTP drafts.
 - **exp-b12x/**: Experimental FlashInfer b12x support for builds that include the required upstream vLLM support.
-- **use-official-vllm/**: Installs `git` inside official vLLM containers (Ubuntu/Debian-based) so that other mods that rely on `git apply` work correctly, and redirects the pip-installed NCCL library to the system `libnccl2` library to avoid DGX Spark multi-node NCCL hangs. Apply this mod first when using official vLLM images (e.g. `vllm-openai`).
+- **use-official-vllm/**: Installs `git`, `earlyoom`, InstantTensor, and SciPy inside official vLLM containers (Ubuntu/Debian-based) so that other mods can rely on `git apply`, the launcher can use `--earlyoom`, and vLLM can use `--load-format instanttensor` and SciPy-based functionality. The Python install preserves the image's existing Torch build. The mod also redirects the pip-installed NCCL library to the system `libnccl2` library to avoid DGX Spark multi-node NCCL hangs. Apply this mod first when using official vLLM images (e.g. `vllm-openai`).
 
 Each mod directory typically contains:
 - Patch files (`.patch`) for code modifications and/or other assets.

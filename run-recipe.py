@@ -701,6 +701,9 @@ Examples:
   # Publish ports in solo mode
   %(prog)s glm-4.7-nvfp4 --solo -p 8000:8000
 
+  # Map host directories into the container
+  %(prog)s glm-4.7-flash-awq --solo -v /local/models:/models -v /local/output:/output
+
   # List available recipes
   %(prog)s --list
 
@@ -825,6 +828,15 @@ Examples:
         metavar="HOST:CONTAINER",
         help="Publish a container port in solo mode, e.g. -p 8000:8000. Can be used multiple times.",
     )
+    launch_group.add_argument(
+        "-v",
+        "--volume",
+        action="append",
+        dest="volume_mappings",
+        default=[],
+        metavar="LOCAL:CONTAINER",
+        help="Map a volume using Docker syntax, e.g. -v /local/path:/container/path. Can be used multiple times.",
+    )
     backend_group = launch_group.add_mutually_exclusive_group()
     backend_group.add_argument(
         "--ray",
@@ -878,6 +890,18 @@ Examples:
         action="store_true",
         dest="keep_entrypoint",
         help="Keep the Docker image entrypoint instead of clearing it before launch",
+    )
+    launch_group.add_argument(
+        "--earlyoom",
+        action="store_true",
+        dest="earlyoom",
+        help="Run earlyoom as the container foreground process instead of sleep infinity",
+    )
+    launch_group.add_argument(
+        "--earlyoom-args",
+        dest="earlyoom_args",
+        metavar="ARGS",
+        help="Arguments passed to earlyoom (default: '-M 524288,102400 -s 100 -r 60')",
     )
     launch_group.add_argument(
         "--non-privileged",
@@ -1079,6 +1103,11 @@ Examples:
             "Error: -p/--publish port forwarding is only supported in solo mode."
         )
         print("Use --solo or remove port mappings for cluster mode.")
+        return 1
+
+    if (args.earlyoom or args.earlyoom_args) and args.keep_entrypoint:
+        print("Error: --earlyoom requires launch-cluster.sh to clear the image entrypoint.")
+        print("Remove --keep-entrypoint so earlyoom can run as the foreground process.")
         return 1
 
     # Determine copy targets for build/model distribution.
@@ -1299,6 +1328,8 @@ Examples:
             cmd_parts.extend(["-e", env_var])
         for port_mapping in args.port_mappings:
             cmd_parts.extend(["-p", port_mapping])
+        for volume_mapping in args.volume_mappings:
+            cmd_parts.extend(["-v", volume_mapping])
         if args.master_port:
             cmd_parts.extend(["--master-port", str(args.master_port)])
         if args.container_name:
@@ -1313,6 +1344,10 @@ Examples:
             cmd_parts.append("--no-cache-dirs")
         if args.keep_entrypoint:
             cmd_parts.append("--keep-entrypoint")
+        if args.earlyoom:
+            cmd_parts.append("--earlyoom")
+        if args.earlyoom_args:
+            cmd_parts.extend(["--earlyoom-args", args.earlyoom_args])
         if args.non_privileged:
             cmd_parts.append("--non-privileged")
         if args.mem_limit_gb:
@@ -1383,6 +1418,8 @@ Examples:
 
         for port_mapping in args.port_mappings:
             cmd.extend(["-p", port_mapping])
+        for volume_mapping in args.volume_mappings:
+            cmd.extend(["-v", volume_mapping])
 
         if args.master_port:
             cmd.extend(["--master-port", str(args.master_port)])
@@ -1398,6 +1435,10 @@ Examples:
             cmd.append("--no-cache-dirs")
         if args.keep_entrypoint:
             cmd.append("--keep-entrypoint")
+        if args.earlyoom:
+            cmd.append("--earlyoom")
+        if args.earlyoom_args:
+            cmd.extend(["--earlyoom-args", args.earlyoom_args])
         if args.non_privileged:
             cmd.append("--non-privileged")
         if args.mem_limit_gb:
