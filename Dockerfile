@@ -7,9 +7,9 @@ ARG NCCL_NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
 ARG TORCH_VERSION=2.11.0
 ARG TORCHVISION_VERSION=""
 ARG TORCHAUDIO_VERSION=""
-ARG SPARKINFER_REPO=""
-ARG SPARKINFER_REF=""
-ARG SPARKINFER_CACHEBUST=""
+ARG B12X_REPO=""
+ARG B12X_REF=""
+ARG B12X_CACHEBUST=""
 
 # =========================================================
 # STAGE 1: Base Build Image
@@ -339,9 +339,10 @@ RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
 
 WORKDIR $VLLM_BASE_DIR/vllm
 
-# Temporary upstream fixes carried until they are present in the pinned vLLM ref.
-# See https://github.com/vllm-project/vllm/pull/47392
-ARG VLLM_PRESET_PRS="47392"
+# Optional upstream PR patches requested by the build wrapper. PR #47392 is
+# carried as a source-aware runtime patch below because its full diff now
+# conflicts with current upstream main.
+ARG VLLM_PRESET_PRS=""
 ARG VLLM_APPLY_PRESET_PRS=""
 ARG VLLM_PRS=""
 ARG VLLM_PRESERVE_SM12X_TARGET=0
@@ -453,126 +454,33 @@ RUN set -eux; \
         echo "Final vLLM source after PR application: requested $VLLM_REF ($VLLM_REQUESTED_HEAD), final $(git describe --tags --always --dirty)."; \
     fi
 
+# Targeted production subset of vLLM PR #47392. This patches the upstream
+# FlashInfer B12x backend without carrying the PR's conflicting tests/docs.
+# It is also safe for older refs (backend absent) and refs that already contain
+# the fix (idempotent); unknown partial source shapes fail the build.
+COPY docker/patch_vllm_*.py /tmp/vllm-patches/
+RUN python3 /tmp/vllm-patches/patch_vllm_flashinfer_b12x_swigluoai.py .
+
 # TEMPORARY PATCH: vLLM PR #49408 / commit d6dbdb9 misplaced the XPU-only
 # return in topk_hash_softplus_sqrt, making the CUDA/ROCm kernel call dead code.
 # Remove after upstream fix PR #49452 is merged and present in the oldest
 # supported VLLM_REF. Inspect source shape rather than commit ancestry so this
 # also handles rebases, cherry-picks, and builds that already include the fix.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-target = Path("vllm/_custom_ops.py")
-function_marker = "def topk_hash_softplus_sqrt("
-direct_call = "\n    torch.ops._moe_C.topk_softplus_sqrt("
-misplaced_return = "\n\n    return" + direct_call
-fixed_return = "\n        return\n" + direct_call
-
-if not target.exists():
-    raise SystemExit(f"{target} not found; cannot inspect vLLM PR #49408 regression")
-
-text = target.read_text()
-start = text.find(function_marker)
-if start == -1:
-    print("topk_hash_softplus_sqrt is absent; vLLM PR #49408 is not applicable")
-else:
-    end = text.find("\ndef ", start + len(function_marker))
-    end = len(text) if end == -1 else end
-    function = text[start:end]
-
-    if "is_padding" not in function:
-        print("topk_hash_softplus_sqrt predates vLLM PR #49408; skipping workaround")
-    elif fixed_return in function:
-        print("vLLM topk_softplus_sqrt non-XPU path already fixed; skipping")
-    elif (
-        direct_call in function
-        and "current_platform.is_xpu()" not in function
-        and "\n    return" not in function
-    ):
-        print("topk_hash_softplus_sqrt has no XPU workaround; patch is not applicable")
-    elif function.count(misplaced_return) == 1:
-        function = function.replace(misplaced_return, fixed_return, 1)
-        updated = text[:start] + function + text[end:]
-        compile(updated, str(target), "exec")
-        target.write_text(updated)
-        print("Applied vLLM PR #49452 topk_softplus_sqrt control-flow fix")
-    else:
-        raise SystemExit(
-            "Unknown is_padding-aware topk_hash_softplus_sqrt layout; "
-            "refusing to guess whether vLLM PR #49408 is fixed"
-        )
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_topk_softplus_sqrt_control_flow.py .
 
 # CUDA 13 vLLM builds normally collapse a requested 12.1a target to the
 # generic 12.0 entry. Adding 12.1 to the supported set preserves the selected
 # SM12x target through CMake's intersection logic: 12.1a remains 12.1a, while
 # explicitly selected 12.0a and 12.0f targets remain unchanged. Keep this
 # opt-in so the standard upstream build retains its own architecture policy.
-RUN VLLM_PRESERVE_SM12X_TARGET="${VLLM_PRESERVE_SM12X_TARGET}" python3 - <<'PY'
-import os
-from pathlib import Path
-
-if os.environ["VLLM_PRESERVE_SM12X_TARGET"] not in {
-    "1", "true", "TRUE", "yes", "YES"
-}:
-    print("SM12x target preservation not requested; skipping")
-    raise SystemExit(0)
-
-target = Path("CMakeLists.txt")
-cuda13_default = (
-    'set(CUDA_SUPPORTED_ARCHS '
-    '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")'
-)
-cuda13_sm121 = (
-    'set(CUDA_SUPPORTED_ARCHS '
-    '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")'
-)
-
-text = target.read_text()
-if cuda13_sm121 in text:
-    print("CUDA 13 SM12x subarchitecture allow-list already present; skipping")
-elif text.count(cuda13_default) == 1:
-    target.write_text(text.replace(cuda13_default, cuda13_sm121, 1))
-    print("Enabled selected SM12x target preservation for CUDA 13 vLLM build")
-else:
-    raise SystemExit(
-        "Unable to preserve the selected SM12x target: expected CUDA 13 "
-        "CUDA_SUPPORTED_ARCHS entry was not found exactly once"
-    )
-PY
+RUN VLLM_PRESERVE_SM12X_TARGET="${VLLM_PRESERVE_SM12X_TARGET}" \
+    python3 /tmp/vllm-patches/patch_vllm_preserve_sm12x_target.py .
 
 # TEMPORARY PATCH: vLLM PR #47914 added per-KV-group causal metadata by
 # treating non-bool causal as Mapping[int, bool]. DiffusionGemma passes a
 # per-request torch.Tensor causal mask and crashes on causal.get(...). Keep this
 # until upstream build_attn_metadata accepts Tensor causal again.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-target = Path("vllm/v1/worker/gpu/attn_utils.py")
-bad_signature = "causal: bool | Mapping[int, bool] = True,"
-fixed_signature = "causal: bool | Mapping[int, bool] | torch.Tensor = True,"
-bad_group_causal = (
-    "        group_causal = causal if isinstance(causal, bool) else "
-    "causal.get(i, True)"
-)
-fixed_group_causal = """        if isinstance(causal, (bool, torch.Tensor)):
-            group_causal = causal
-        else:
-            group_causal = causal.get(i, True)"""
-
-if not target.exists():
-    raise SystemExit(f"{target} not found; cannot apply DiffusionGemma causal patch")
-
-text = target.read_text()
-if fixed_signature in text and fixed_group_causal in text:
-    print("DiffusionGemma Tensor causal workaround already present; skipping")
-elif bad_signature in text and bad_group_causal in text:
-    text = text.replace(bad_signature, fixed_signature, 1)
-    text = text.replace(bad_group_causal, fixed_group_causal, 1)
-    target.write_text(text)
-    print("Applied DiffusionGemma Tensor causal workaround for vLLM PR #47914")
-else:
-    print("Known vLLM PR #47914 causal regression pattern not found; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_diffusion_tensor_causal.py .
 
 # TEMPORARY PATCH: vLLM PR #43957 added a generic embedding-width guard for
 # EAGLE3, but Gemma4 MTP intentionally replaces its draft embedding with the
@@ -580,101 +488,19 @@ PY
 # concatenates 1024-wide draft embeddings with 2816-wide backbone hidden states
 # and crashes in a 5632-wide pre_projection. Keep the guard scoped to EAGLE-style
 # draft models until upstream fixes https://github.com/vllm-project/vllm/issues/47794.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-target = Path("vllm/v1/spec_decode/llm_base_proposer.py")
-old = """            if share_embeddings:
-                draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
-                # Guard with isinstance so non-Tensor weights (e.g. in tests)
-"""
-new = """            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
-                draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
-                # Guard with isinstance so non-Tensor weights (e.g. in tests)
-"""
-
-if not target.exists():
-    print(f"{target} not found; skipping Gemma4 MTP embedding-share workaround")
-else:
-    text = target.read_text()
-    if 'if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):' in text:
-        print("Gemma4 MTP embedding-share workaround already present; skipping")
-    elif old in text:
-        target.write_text(text.replace(old, new, 1))
-        print("Applied Gemma4 MTP embedding-share workaround")
-    else:
-        print("Known Gemma4 MTP embedding-share pattern not found; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_gemma4_mtp_embedding_share.py .
 
 # TEMPORARY PATCH (source build only): vLLM PR #43008 selects cooperative_topk
 # for all SM90+ devices. On DGX Spark / SM12.x this fails at launch with
 # "cooperative_topk launch failed: invalid argument". Keep the cooperative
 # path on SM90 and let newer architectures use the existing persistent_topk fallback.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-target = Path("vllm/model_executor/layers/sparse_attn_indexer.py")
-old = '''        use_cooperative_topk = (
-            current_platform.is_cuda()
-            and topk_tokens in (512, 1024, 2048)
-            and num_rows <= 32
-            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
-            and current_platform.has_device_capability(90)
-        )'''
-new = '''        device_capability = current_platform.get_device_capability()
-        use_cooperative_topk = (
-            current_platform.is_cuda()
-            and topk_tokens in (512, 1024, 2048)
-            and num_rows <= 32
-            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
-            and device_capability is not None
-            and device_capability.to_int() == 90
-        )'''
-
-if not target.exists():
-    print(f"{target} not found; skipping SM120 cooperative_topk workaround")
-else:
-    text = target.read_text()
-    if "device_capability.to_int() == 90" in text:
-        print("SM120 cooperative_topk workaround already present; skipping")
-    elif old in text:
-        target.write_text(text.replace(old, new, 1))
-        print("Applied SM120 cooperative_topk workaround")
-    else:
-        print("Known cooperative_topk selector pattern not found; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_sm120_cooperative_topk.py .
 
 # TEMPORARY PATCH: vLLM PR #43409 started passing AutoGPTQ MoE qzeros
 # through even for symmetric GPTQ. On CUDA Marlin MoE this can select the
 # wrong zero-point kernel path and crash Qwen3-Coder-Next AutoRound during
 # startup. Apply only when the vulnerable upstream pattern is present.
-RUN python3 - <<PY
-from pathlib import Path
-
-target = Path("vllm/model_executor/layers/quantization/auto_gptq.py")
-bad = '''            w1_zp=getattr(layer, "w13_qzeros", None),
-            w2_zp=getattr(layer, "w2_qzeros", None),'''
-fixed = '''            w1_zp=getattr(layer, "w13_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
-            w2_zp=getattr(layer, "w2_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,'''
-
-if not target.exists():
-    print(f"{target} not found; skipping AutoGPTQ MoE qzeros workaround")
-else:
-    text = target.read_text()
-    if fixed in text:
-        print("AutoGPTQ MoE qzeros workaround already present; skipping")
-    elif bad in text:
-        target.write_text(text.replace(bad, fixed, 1))
-        print("Applied AutoGPTQ symmetric MoE qzeros workaround")
-    else:
-        print("Known vulnerable AutoGPTQ MoE qzeros pattern not found; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_autogptq_symmetric_moe_qzeros.py .
 
 # # TEMPORARY PATCH for broken FP8 kernels - https://github.com/vllm-project/vllm/pull/35568
 # RUN curl -fsL https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/35568.diff -o pr35568.diff \
@@ -710,233 +536,17 @@ PY
 # TEMPORARY PATCH: disable the MiniMax QK RMSNorm CUDA IPC fusion from vLLM
 # PR #43410. A full git revert now conflicts with current upstream, and the
 # runtime failure happens while allocating the Lamport workspace.
-RUN set -eux; \
-    target="vllm/model_executor/layers/minimax_rms_norm/rms_norm_tp.py"; \
-    marker='_MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)'; \
-    replacement='_MINIMAX_FUSED_AR_RMS_QK = None  # Disabled for DGX Spark multi-node TP'; \
-    if [ -f "$target" ] && grep -Fq "$marker" "$target"; then \
-        echo "MiniMax QK norm fusion found; disabling CUDA IPC fused path"; \
-        sed -i "s|$marker|$replacement|" "$target"; \
-    elif [ -f "$target" ] && grep -Fq "$replacement" "$target"; then \
-        echo "MiniMax QK norm fusion already disabled"; \
-    else \
-        echo "MiniMax QK norm fusion marker not present; skipping patch"; \
-    fi; \
-    if [ -f "$target" ] && grep -Fq "$marker" "$target"; then \
-        echo "ERROR: MiniMax QK norm fusion marker is still present"; \
-        exit 1; \
-    fi
+RUN python3 /tmp/vllm-patches/patch_vllm_disable_minimax_qk_rmsnorm_ipc.py .
 
 # TEMPORARY PATCH: vLLM PR #43362 made RoutedExperts scalarize all
 # _load_single_value() inputs. That is correct for scalar input scales, but
 # compressed-tensors MoE checkpoints also load 2-element weight_shape metadata
 # through this path. Preserve vector metadata when the destination slot matches.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-target = Path("vllm/model_executor/layers/fused_moe/routed_experts.py")
-old = '''    def _load_single_value(
-        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
-    ):
-        param_data = param.data
-
-        # Input scales can be loaded directly and should be equal.
-        param_data[expert_id] = self._to_scalar(loaded_weight)
-'''
-new = '''    def _load_single_value(
-        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
-    ):
-        param_data = param.data
-        target = param_data[expert_id]
-
-        if target.ndim > 0 and target.numel() == loaded_weight.numel():
-            target.copy_(loaded_weight.reshape_as(target).to(
-                device=target.device, dtype=target.dtype))
-            return
-
-        # Scalar input scales can be loaded directly and should be equal.
-        param_data[expert_id] = self._to_scalar(loaded_weight)
-'''
-
-if not target.exists():
-    print(f"{target} not found; skipping RoutedExperts weight_shape workaround")
-else:
-    text = target.read_text()
-    if "target = param_data[expert_id]" in text:
-        print("RoutedExperts weight_shape workaround already present; skipping")
-    elif old in text:
-        target.write_text(text.replace(old, new, 1))
-        print("Applied RoutedExperts weight_shape workaround")
-    else:
-        print("Known vulnerable RoutedExperts _load_single_value pattern not found; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_routed_experts_weight_shape.py .
 
 # DGX Spark UMA cleanup: profile warmup can leave temporary CUDA allocator
 # reservations behind just before vLLM sizes and allocates KV cache blocks.
-RUN python3 - <<'PY'
-from pathlib import Path
-import re
-
-target = Path("vllm/v1/worker/gpu_worker.py")
-
-if not target.exists():
-    raise SystemExit(f"{target} not found; cannot apply KV cache cleanup patch")
-
-text = target.read_text()
-lines = text.splitlines(keepends=True)
-changed = False
-
-profile_cleanup_present = (
-    "profile_result.after_profile.measure()" in text
-    and "diff_from_create.non_torch_memory" in text
-)
-prealloc_cleanup_present = (
-    "memory_reserved(self.device)" in text
-    and "memory_allocated(self.device)" in text
-    and "empty_cache()" in text
-)
-needs_cleanup = not (profile_cleanup_present and prealloc_cleanup_present)
-
-if needs_cleanup and not re.search(r"(?m)^import gc$", text):
-    insert_at = None
-    last_future_import = None
-    for i, line in enumerate(lines):
-        if line.startswith("from __future__ import "):
-            last_future_import = i
-        elif insert_at is None and (
-            line.startswith("import ") or line.startswith("from ")
-        ):
-            insert_at = i
-    if last_future_import is not None:
-        lines.insert(last_future_import + 1, "import gc\n")
-    elif insert_at is not None:
-        lines.insert(insert_at, "import gc\n")
-    else:
-        lines.insert(0, "import gc\n")
-    changed = True
-
-
-def find_line(pattern: str) -> tuple[int, re.Match[str]]:
-    regex = re.compile(pattern)
-    for index, line in enumerate(lines):
-        match = regex.match(line)
-        if match:
-            return index, match
-    raise SystemExit(f"Could not find expected vLLM pattern: {pattern}")
-
-
-def insert_after_docstring(func_index: int, func_indent: str, block: list[str]) -> None:
-    insert_at = func_index + 1
-    if insert_at < len(lines):
-        stripped = lines[insert_at].lstrip()
-        quote = None
-        if stripped.startswith(chr(34) * 3):
-            quote = chr(34) * 3
-        elif stripped.startswith(chr(39) * 3):
-            quote = chr(39) * 3
-
-        if quote is not None:
-            if stripped.count(quote) >= 2 and not stripped.startswith(quote * 2):
-                insert_at += 1
-            else:
-                insert_at += 1
-                while insert_at < len(lines):
-                    if quote in lines[insert_at]:
-                        insert_at += 1
-                        break
-                    insert_at += 1
-
-    lines[insert_at:insert_at] = block
-
-
-if not profile_cleanup_present:
-    snapshot_line = (
-        r"^(?P<indent>[ \t]+)free_gpu_memory = "
-        r"profile_result\.after_profile\.free_memory\n$"
-    )
-    index, match = find_line(snapshot_line)
-    indent = match.group("indent")
-    lines[index:index] = [
-        f"{indent}# spark-vllm-docker: post-profile cleanup before KV sizing\n",
-        f'{indent}if self.device_config.device_type == "cuda":\n',
-        f"{indent}    before_cleanup = profile_result.after_profile.free_memory\n",
-        f'{indent}    if hasattr(self.model_runner, "_cleanup_profiling_kv_cache"):\n',
-        f"{indent}        self.model_runner._cleanup_profiling_kv_cache()\n",
-        f"{indent}    gc.collect()\n",
-        f"{indent}    torch.cuda.synchronize(self.device)\n",
-        f"{indent}    torch.cuda.empty_cache()\n",
-        f"{indent}    profile_result.after_profile.measure()\n",
-        f"{indent}    diff_from_create = (\n",
-        f"{indent}        profile_result.after_profile - profile_result.before_create\n",
-        f"{indent}    )\n",
-        f"{indent}    profile_result.non_torch_increase = (\n",
-        f"{indent}        diff_from_create.non_torch_memory\n",
-        f"{indent}    )\n",
-        f"{indent}    profile_result.non_kv_cache_memory = (\n",
-        f"{indent}        profile_result.non_torch_increase\n",
-        f"{indent}        + profile_result.torch_peak_increase\n",
-        f"{indent}        + profile_result.weights_memory\n",
-        f"{indent}    )\n",
-        f"{indent}    cleanup_freed = (\n",
-        f"{indent}        profile_result.after_profile.free_memory - before_cleanup\n",
-        f"{indent}    )\n",
-        f"{indent}    if cleanup_freed > 0:\n",
-        f"{indent}        logger.info_once(\n",
-        f'{indent}            "Freed %.2f GiB before KV cache sizing; "\n',
-        f'{indent}            "non-torch profile increase is %.2f GiB.",\n',
-        f"{indent}            cleanup_freed / (1024**3),\n",
-        f"{indent}            profile_result.non_torch_increase / (1024**3),\n",
-        f"{indent}        )\n",
-        "\n",
-    ]
-    changed = True
-
-if not prealloc_cleanup_present:
-    func_index = None
-    func_indent = None
-    for i, line in enumerate(lines):
-        match = re.match(
-            r"^(?P<indent>[ \t]+)def initialize_from_config"
-            r"\(self,\s*kv_cache_config\b",
-            line,
-        )
-        if match:
-            func_index = i
-            func_indent = match.group("indent")
-            break
-
-    if func_index is None or func_indent is None:
-        raise SystemExit("Could not find initialize_from_config in vLLM gpu_worker.py")
-
-    body_indent = func_indent + "    "
-    block = [
-        f"{body_indent}# spark-vllm-docker: pre-KV cache allocator cleanup\n",
-        f'{body_indent}if self.device_config.device_type == "cuda":\n',
-        f"{body_indent}    gc.collect()\n",
-        f"{body_indent}    torch.cuda.synchronize(self.device)\n",
-        f"{body_indent}    cached_memory = max(\n",
-        f"{body_indent}        torch.cuda.memory_reserved(self.device)\n",
-        f"{body_indent}        - torch.cuda.memory_allocated(self.device),\n",
-        f"{body_indent}        0,\n",
-        f"{body_indent}    )\n",
-        f"{body_indent}    torch.cuda.empty_cache()\n",
-        f"{body_indent}    if cached_memory > 0:\n",
-        f"{body_indent}        logger.info_once(\n",
-        f'{body_indent}            "Cleared %.2f GiB of cached CUDA allocator memory before "\n',
-        f'{body_indent}            "KV cache allocation.",\n',
-        f"{body_indent}            cached_memory / (1024**3),\n",
-        f"{body_indent}        )\n",
-        "\n",
-    ]
-    insert_after_docstring(func_index, func_indent, block)
-    changed = True
-
-if changed:
-    target.write_text("".join(lines))
-    print("Applied Spark KV cache cleanup patch")
-else:
-    print("Equivalent Spark KV cache cleanup already present; skipping")
-PY
+RUN python3 /tmp/vllm-patches/patch_vllm_spark_kv_cache_cleanup.py .
 
 
 # Prepare build requirements
@@ -988,9 +598,9 @@ FROM ${CUDA_IMAGE} AS runner
 ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
 ARG TORCHAUDIO_VERSION
-ARG SPARKINFER_REPO
-ARG SPARKINFER_REF
-ARG SPARKINFER_CACHEBUST
+ARG B12X_REPO
+ARG B12X_REF
+ARG B12X_CACHEBUST
 
 # Transferring build settings from build image because of ptxas/jit compilation during vLLM startup
 # Build parallemism
@@ -1097,25 +707,24 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv pip install ray[default] fastsafetensors instanttensor \
         --override /tmp/torch-override.txt
 
-# The local-inference-lab vLLM fork consumes the external SparkInfer kernel package
-# (formerly named B12X)
+# The local-inference-lab vLLM fork consumes the external B12X kernel package
 # at runtime. Keep this opt-in so ordinary vLLM/Torch 2.11 images do not pull a
-# package that requires Torch 2.12. Build SparkInfer from its source repository but
+# package that requires Torch 2.12. Build B12X from its source repository but
 # install it without dependencies: vLLM already provides the runtime packages
-# and pins API-sensitive components such as nvidia-cutlass-dsl. SparkInfer kernels
+# and pins API-sensitive components such as nvidia-cutlass-dsl. B12X kernels
 # remain JIT-compiled on first use; building its Python wheel here does not
 # compile the CUDA kernels.
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    if [ -n "$SPARKINFER_REPO" ]; then \
-        echo "Refreshing SparkInfer source (cache key: $SPARKINFER_CACHEBUST)" && \
-        git clone --depth 1 --branch "$SPARKINFER_REF" "$SPARKINFER_REPO" /tmp/sparkinfer-source && \
-        SPARKINFER_COMMIT=$(git -C /tmp/sparkinfer-source rev-parse HEAD) && \
-        uv pip install --reinstall --no-deps /tmp/sparkinfer-source && \
-        printf '%s\n' "$SPARKINFER_COMMIT" > /workspace/sparkinfer-source-commit && \
-        python3 -c "import importlib.metadata as m, sys; import sparkinfer; print('Verified SparkInfer', m.version('sparkinfer'), 'from source commit', sys.argv[1], 'with CUTLASS DSL', m.version('nvidia-cutlass-dsl'))" "$SPARKINFER_COMMIT" && \
-        rm -rf /tmp/sparkinfer-source; \
+    if [ -n "$B12X_REPO" ]; then \
+        echo "Refreshing B12X source (cache key: $B12X_CACHEBUST)" && \
+        git clone --depth 1 --branch "$B12X_REF" "$B12X_REPO" /tmp/b12x-source && \
+        B12X_COMMIT=$(git -C /tmp/b12x-source rev-parse HEAD) && \
+        uv pip install --reinstall --no-deps /tmp/b12x-source && \
+        printf '%s\n' "$B12X_COMMIT" > /workspace/b12x-source-commit && \
+        python3 -c "import importlib.metadata as m, sys; import b12x; print('Verified B12X', m.version('b12x'), 'from source commit', sys.argv[1], 'with CUTLASS DSL', m.version('nvidia-cutlass-dsl'))" "$B12X_COMMIT" && \
+        rm -rf /tmp/b12x-source; \
     else \
-        echo "SparkInfer source build not requested; skipping."; \
+        echo "B12X source build not requested; skipping."; \
     fi
 
 # Fix NCCL

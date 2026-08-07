@@ -48,6 +48,7 @@ setup_fixture() {
     cp "$PROJECT_DIR/autodiscover.sh" "$FIXTURE_DIR/"
     cp "$PROJECT_DIR/Dockerfile" "$FIXTURE_DIR/"
     cp "$PROJECT_DIR/Dockerfile.mxfp4" "$FIXTURE_DIR/"
+    cp -a "$PROJECT_DIR/docker" "$FIXTURE_DIR/"
     mkdir -p \
         "$FIXTURE_DIR/.wheel-cache/flashinfer/regular" \
         "$FIXTURE_DIR/.wheel-cache/flashinfer/custom" \
@@ -509,7 +510,7 @@ test_custom_vllm_repo_forces_source_build() {
     assert_log_not_contains '^docker pull eugr/spark-vllm:latest$'
     assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=main --build-arg VLLM_REPO=https://github.com/example/vllm.git --build-arg VLLM_APPLY_PRESET_PRS=0'
     assert_log_contains '^docker build -t vllm-node .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/custom '
-    assert_log_not_contains 'SPARKINFER_REPO='
+    assert_log_not_contains 'B12X_REPO='
     assert_output_contains 'Rebuilding vLLM wheels \(--vllm-repo specified\)\.\.\.'
     assert_output_contains 'Skipping preset vLLM PRs because --vllm-repo, --vllm-ref, or --apply-vllm-pr was specified\.'
     pass "--vllm-repo forces a source build and suppresses upstream preset PRs"
@@ -529,11 +530,11 @@ test_exp_b12x_rebuild_vllm_uses_preset_source_build() {
     run_build --exp-b12x --rebuild-vllm || fail "--exp-b12x --rebuild-vllm run failed"
     assert_log_not_contains '^docker pull eugr/spark-vllm-b12x:latest$'
     assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.12.0 --build-arg TORCHVISION_VERSION=0.27.0 --build-arg TORCHAUDIO_VERSION=none .*--build-arg VLLM_REF=dev/gilded-gnosis --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1'
-    assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg SPARKINFER_REPO=https://github.com/lukealonso/b12x.git --build-arg SPARKINFER_REF=master '
-    assert_log_contains '.*--build-arg SPARKINFER_CACHEBUST=[0-9]+'
+    assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
+    assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
     assert_log_not_contains 'Dockerfile\.mxfp4'
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset\)\.\.\.'
-    assert_output_contains 'Building SparkInfer from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/gilded-gnosis\.'
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/gilded-gnosis\.'
     pass "--exp-b12x --rebuild-vllm uses the B12X source-build profile"
 }
 
@@ -638,10 +639,17 @@ test_dockerfile_preserves_selected_sm12x_target() {
         "$PROJECT_DIR/Dockerfile" > "$sm12x_block"
     for expected in \
         'VLLM_PRESERVE_SM12X_TARGET="${VLLM_PRESERVE_SM12X_TARGET}"' \
-        '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1"' \
-        'Enabled selected SM12x target preservation for CUDA 13 vLLM build'; do
+        '/tmp/vllm-patches/patch_vllm_preserve_sm12x_target.py'; do
         if ! grep -Fq "$expected" "$sm12x_block"; then
             fail "Dockerfile SM12x build guard is missing: $expected"
+        fi
+    done
+    for expected in \
+        '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1"' \
+        'Enabled selected SM12x target preservation for CUDA 13 vLLM build'; do
+        if ! grep -Fq "$expected" \
+            "$PROJECT_DIR/docker/patch_vllm_preserve_sm12x_target.py"; then
+            fail "External SM12x patch is missing: $expected"
         fi
     done
     pass "B12X preserves the selected SM12x target under CUDA 13"
@@ -656,10 +664,10 @@ test_custom_torch_versions_are_forwarded() {
         --torchvision-version 0.27.0 \
         --torchaudio-version none || fail "custom Torch version run failed"
     assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_VERSION=2.12.0 --build-arg TORCHVISION_VERSION=0.27.0 --build-arg TORCHAUDIO_VERSION=none .*--build-arg VLLM_REF=dev/fathomless-firmament --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm.git'
-    assert_log_contains '^docker build -t vllm-node .*--build-arg TORCH_VERSION=2.12.0 --build-arg TORCHVISION_VERSION=0.27.0 --build-arg TORCHAUDIO_VERSION=none .*--build-arg SPARKINFER_REPO=https://github.com/lukealonso/b12x.git --build-arg SPARKINFER_REF=master '
-    assert_log_contains '.*--build-arg SPARKINFER_CACHEBUST=[0-9]+'
-    assert_output_contains 'Building SparkInfer from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/fathomless-firmament\.'
-    pass "Torch versions and the SparkInfer source checkout are forwarded to the fork build"
+    assert_log_contains '^docker build -t vllm-node .*--build-arg TORCH_VERSION=2.12.0 --build-arg TORCHVISION_VERSION=0.27.0 --build-arg TORCHAUDIO_VERSION=none .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
+    assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/fathomless-firmament\.'
+    pass "Torch versions and the B12X source checkout are forwarded to the fork build"
 }
 
 test_local_inference_lab_b12x_applies_to_any_ref() {
@@ -668,9 +676,9 @@ test_local_inference_lab_b12x_applies_to_any_ref() {
         --vllm-repo https://github.com/local-inference-lab/vllm \
         --vllm-ref dev/spark-fixes-7-14 \
         --torch-version 2.12.0 || fail "local-inference-lab alternate ref run failed"
-    assert_log_contains '^docker build -t vllm-node .*--build-arg TORCH_VERSION=2.12.0 .*--build-arg SPARKINFER_REPO=https://github.com/lukealonso/b12x.git --build-arg SPARKINFER_REF=master '
-    assert_output_contains 'Building SparkInfer from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/spark-fixes-7-14\.'
-    pass "all local-inference-lab/vllm refs include the SparkInfer source build"
+    assert_log_contains '^docker build -t vllm-node .*--build-arg TORCH_VERSION=2.12.0 .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/spark-fixes-7-14\.'
+    pass "all local-inference-lab/vllm refs include the B12X source build"
 }
 
 test_local_inference_lab_b12x_requires_torch_212() {
@@ -681,8 +689,8 @@ test_local_inference_lab_b12x_requires_torch_212() {
         fail "local-inference-lab B12X build unexpectedly accepted the default Torch 2.11"
     fi
     assert_log_not_contains '^docker build'
-    assert_output_contains 'Error: https://github\.com/local-inference-lab/vllm requires --torch-version 2\.12\.0 or newer for SparkInfer \(got 2\.11\.0\)\.'
-    pass "local-inference-lab SparkInfer builds reject Torch versions older than 2.12"
+    assert_output_contains 'Error: https://github\.com/local-inference-lab/vllm requires --torch-version 2\.12\.0 or newer for B12X \(got 2\.11\.0\)\.'
+    pass "local-inference-lab B12X builds reject Torch versions older than 2.12"
 }
 
 test_dockerfile_custom_repo_bypasses_shared_cache() {
@@ -725,26 +733,26 @@ test_dockerfile_uses_profiled_named_wheel_contexts() {
     pass "Dockerfile mounts independent profiled wheel contexts"
 }
 
-test_dockerfile_builds_and_verifies_sparkinfer_source() {
+test_dockerfile_builds_and_verifies_b12x_source() {
     for expected in \
-        'git clone --depth 1 --branch "$SPARKINFER_REF" "$SPARKINFER_REPO" /tmp/sparkinfer-source' \
-        'Refreshing SparkInfer source (cache key: $SPARKINFER_CACHEBUST)' \
-        'uv pip install --reinstall --no-deps /tmp/sparkinfer-source' \
-        "import sparkinfer; print('Verified SparkInfer'" \
-        "m.version('sparkinfer')" \
-        '/workspace/sparkinfer-source-commit' \
+        'git clone --depth 1 --branch "$B12X_REF" "$B12X_REPO" /tmp/b12x-source' \
+        'Refreshing B12X source (cache key: $B12X_CACHEBUST)' \
+        'uv pip install --reinstall --no-deps /tmp/b12x-source' \
+        "import b12x; print('Verified B12X'" \
+        "m.version('b12x')" \
+        '/workspace/b12x-source-commit' \
         "m.version('nvidia-cutlass-dsl')"; do
         if ! grep -Fq "$expected" "$PROJECT_DIR/Dockerfile"; then
-            fail "Dockerfile SparkInfer source build is missing: $expected"
+            fail "Dockerfile B12X source build is missing: $expected"
         fi
     done
-    if grep -Fq 'sparkinfer==' "$PROJECT_DIR/Dockerfile"; then
-        fail "Dockerfile installs SparkInfer from a package index instead of source"
+    if grep -Fq 'b12x==' "$PROJECT_DIR/Dockerfile"; then
+        fail "Dockerfile installs B12X from a package index instead of source"
     fi
-    if grep -Eq "import b12x|m\.version\('b12x'\)" "$PROJECT_DIR/Dockerfile"; then
-        fail "Dockerfile still verifies the retired b12x package name"
+    if grep -Eq "import sparkinfer|m\.version\('sparkinfer'\)" "$PROJECT_DIR/Dockerfile"; then
+        fail "Dockerfile still verifies the retired sparkinfer package name"
     fi
-    pass "Dockerfile builds SparkInfer from source without replacing vLLM dependencies"
+    pass "Dockerfile builds B12X from source without replacing vLLM dependencies"
 }
 
 test_copied_vllm_git_index_is_refreshed_before_patch_apply() {
@@ -839,6 +847,38 @@ test_dockerfile_fetches_vllm_prs_from_upstream() {
     pass "vLLM PR patches are fetched from upstream when building a fork"
 }
 
+test_dockerfile_externalizes_vllm_source_patches() {
+    local patch_section="$TMP_BASE/vllm-source-patches"
+    local patch_count=0
+
+    sed -n '/COPY docker\/patch_vllm_\*\.py/,/# Prepare build requirements/p' \
+        "$PROJECT_DIR/Dockerfile" > "$patch_section"
+    if grep -Eq 'python3[[:space:]]+-[[:space:]]+<<' "$patch_section"; then
+        fail "Dockerfile still embeds a Python vLLM source patch"
+    fi
+
+    for patch_path in "$PROJECT_DIR"/docker/patch_vllm_*.py; do
+        patch_name="$(basename "$patch_path")"
+        patch_count=$((patch_count + 1))
+        if ! grep -Fq "/tmp/vllm-patches/$patch_name" "$patch_section"; then
+            fail "Dockerfile does not execute external patch: $patch_name"
+        fi
+    done
+    if [ "$patch_count" -ne 10 ]; then
+        fail "Expected 10 external vLLM patch scripts, found $patch_count"
+    fi
+    if ! python3 -c '
+from pathlib import Path
+import sys
+files = sorted(Path(sys.argv[1]).glob("patch_vllm_*.py"))
+for path in files:
+    compile(path.read_text(), str(path), "exec")
+' "$PROJECT_DIR/docker"; then
+        fail "An external vLLM patch script has invalid Python syntax"
+    fi
+    pass "Dockerfile externalizes every active vLLM source patch"
+}
+
 test_default_uses_prebuilt
 test_tf5_uses_prebuilt_tf5_tag
 test_custom_tag_uses_prebuilt_custom_tag
@@ -888,10 +928,11 @@ test_local_inference_lab_b12x_requires_torch_212
 test_dockerfile_custom_repo_bypasses_shared_cache
 test_dockerfile_uses_configurable_torch_versions
 test_dockerfile_uses_profiled_named_wheel_contexts
-test_dockerfile_builds_and_verifies_sparkinfer_source
+test_dockerfile_builds_and_verifies_b12x_source
 test_copied_vllm_git_index_is_refreshed_before_patch_apply
 test_dockerfile_applies_flashinfer_prs_without_merging_branch_history
 test_dockerfiles_pin_tvm_ffi_regression_version
 test_dockerfile_fetches_vllm_prs_from_upstream
+test_dockerfile_externalizes_vllm_source_patches
 
 echo "Passed $TESTS_PASSED build-and-copy tests."

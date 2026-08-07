@@ -149,15 +149,25 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-08-06
+
+#### GLM-5.2 NVFP4 8x Spark cluster recipe
+
+Added the cluster-only `recipes/8x-spark-cluster/glm-5.2-nvfp4.yaml` recipe for serving `nvidia/GLM-5.2-NVFP4`. Requires 8x nodes. The recipe uses the `vllm-node-b12x` image.
+
+```bash
+./run-recipe.sh recipes/8x-spark-cluster/glm-5.2-nvfp4.yaml
+```
+
 ### 2026-08-03
 
-#### New B12x/SparkInfer image
+#### New B12X image
 
 Added `--exp-b12x` (alias: `--experimental-b12x`) as an alternative version built from [a fork by Luke Alonso](https://github.com/local-inference-lab/vllm/tree/dev/gilded-gnosis). This fork supports a collection of experimental high-performance B12X kernels for sm12x architecture. 
 
 Since it is built from a forked vLLM branch, it will be supported in parallel to the main ("regular") build, at least for the time being.
 
-Specifying `--exp-b12x` without arguments wil pull `eugr/spark-vllm-b12x:latest` from Dockerhub, which is now built and tested together with the main image by CI pipeline on nightly basis (if there are any updates to the source branch or sparkinfer). 
+Specifying `--exp-b12x` without arguments will pull `eugr/spark-vllm-b12x:latest` from Dockerhub, which is now built and tested together with the main image by CI pipeline on nightly basis (if there are any updates to the source branch or B12X).
 
 Add `--rebuild-vllm` to compile from the source. 
 
@@ -217,7 +227,7 @@ resolution.
 
 `--torch-version`, `--torchvision-version`, and `--torchaudio-version` select the packages installed in both the source-build environment and final runner image. The torchvision and torchaudio versions remain resolver-selected when their flags are omitted; `--torchaudio-version none` omits torchaudio when a matching wheel is unavailable.
 
-Builds from any ref in `local-inference-lab/vllm` also clone and build the `master` ref of `lukealonso/b12x` automatically. The repository now produces the `sparkinfer` distribution (formerly `b12x`). The source layer is refreshed on every applicable runner build so a previously cached clone cannot hide newer upstream commits. Only the locally built SparkInfer wheel is installed: its shared dependencies come from vLLM so API-sensitive pins such as CUTLASS DSL are not upgraded out from under the selected vLLM revision. The checked-out commit is recorded at `/workspace/sparkinfer-source-commit` in the image. SparkInfer kernels remain JIT-compiled at runtime; building its Python wheel does not add another CUDA compilation phase to the image build.
+Builds from any ref in `local-inference-lab/vllm` also clone and build the `master` ref of `lukealonso/b12x` automatically. The repository produces the `b12x` distribution. The source layer is refreshed on every applicable runner build so a previously cached clone cannot hide newer upstream commits. Only the locally built B12X wheel is installed: its shared dependencies come from vLLM so API-sensitive pins such as CUTLASS DSL are not upgraded out from under the selected vLLM revision. The checked-out commit is recorded at `/workspace/b12x-source-commit` in the image. B12X kernels remain JIT-compiled at runtime; building its Python wheel does not add another CUDA compilation phase to the image build.
 
 ### 2026-07-10
 
@@ -1385,7 +1395,7 @@ For the maintained experimental B12X combination, the equivalent shortcut is:
 Without local-build flags, this pulls `eugr/spark-vllm-b12x:latest` and tags it
 as `vllm-node-b12x` unless `-t` is supplied. To build the maintained combination
 from `local-inference-lab/vllm@dev/gilded-gnosis` and the `master` branch of the
-B12X/SparkInfer repository, run:
+B12X repository, run:
 
 ```bash
 ./build-and-copy.sh --exp-b12x --rebuild-vllm
@@ -1421,7 +1431,7 @@ Only regular vLLM wheels are downloaded from the published wheel release.
 `--exp-b12x` is therefore incompatible with `--use-wheels`: use bare
 `--exp-b12x` for the published image or add `--rebuild-vllm` for a source build.
 
-For any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `sparkinfer` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. The install uses `--no-deps` to preserve the dependency versions selected by vLLM, including its CUTLASS DSL pin, and records the exact source commit at `/workspace/sparkinfer-source-commit`. SparkInfer requires PyTorch 2.12 or newer.
+For any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `b12x` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. The install uses `--no-deps` to preserve the dependency versions selected by vLLM, including its CUTLASS DSL pin, and records the exact source commit at `/workspace/b12x-source-commit`. B12X requires PyTorch 2.12 or newer.
 
 **Copy existing image without rebuilding:**
 
