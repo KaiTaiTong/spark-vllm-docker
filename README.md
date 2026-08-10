@@ -1402,15 +1402,15 @@ B12X repository, run:
 ```
 
 It can be combined with `--apply-vllm-pr <pr-num>` to build custom vLLM patches.
-The preset preserves the selected SM12x target in vLLM's CUDA 13 CMake
-configuration. It defaults to `12.1a`; the B12X branch's NVFP4 MLA cache
-writer cannot compile if that target is reduced to generic `sm_120`. Explicit
-`--gpu-arch 12.0a` and `--gpu-arch 12.0f` selections remain supported and are
-forwarded unchanged rather than being forced to SM121a. FlashInfer architecture
-validation applies to every standard-Dockerfile build, including B12X: alternate
-targets rebuild FlashInfer when no matching architecture marker is present, and
-the cached wheel records its architecture so a later build cannot silently reuse
-a wheel for a different target.
+The preset preserves selected Blackwell subarchitectures in vLLM's CUDA 13
+CMake configuration. This prevents targets such as `10.3a` and the default
+`12.1a` from being reduced to generic `sm_100` or `sm_120`, which cannot compile
+the B12X branch's NVFP4 cache writer. Explicit `--gpu-arch 12.0a` and
+`--gpu-arch 12.0f` selections remain supported and are forwarded unchanged.
+FlashInfer architecture validation applies to every standard-Dockerfile build,
+including B12X: alternate targets rebuild FlashInfer when no matching
+architecture marker is present, and the cached wheel records its architecture
+so a later build cannot silently reuse a wheel for a different target.
 
 Custom vLLM repositories are cloned fresh instead of using the shared upstream checkout cache. Specifying a custom repository forces a vLLM source build. Upstream preset PRs are skipped by default for custom repositories and refs.
 

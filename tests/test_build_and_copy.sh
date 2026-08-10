@@ -600,18 +600,21 @@ test_exp_b12x_variable_names_are_generic() {
     pass "B12X preset variables use generic EXP_B12X names"
 }
 
-test_exp_b12x_supports_sm120_arches() {
+test_exp_b12x_preserves_blackwell_arches() {
     local arch
-    for arch in 12.0a 12.0f; do
+    local nccl_arch
+    for arch in 10.3a 12.0a 12.0f; do
+        nccl_arch="${arch%[a-z]}"
+        nccl_arch="${nccl_arch//./}"
         setup_fixture
         run_build --exp-b12x --gpu-arch "$arch" || \
             fail "--exp-b12x --gpu-arch $arch run failed"
         assert_log_contains "^docker build --target flashinfer-export .*--build-arg FLASHINFER_CUDA_ARCH_LIST=${arch} .*--build-arg FLASHINFER_REF=main"
-        assert_log_contains "^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=${arch} --build-arg FLASHINFER_CUDA_ARCH_LIST=${arch} .*--build-arg NCCL_NVCC_GENCODE=-gencode=arch=compute_120,code=sm_120 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1"
+        assert_log_contains "^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=${arch} --build-arg FLASHINFER_CUDA_ARCH_LIST=${arch} .*--build-arg NCCL_NVCC_GENCODE=-gencode=arch=compute_${nccl_arch},code=sm_${nccl_arch} .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1"
         assert_log_contains "^docker build -t vllm-node-b12x .*--build-arg TORCH_CUDA_ARCH_LIST=${arch} --build-arg FLASHINFER_CUDA_ARCH_LIST=${arch} "
         assert_output_contains "Rebuilding FlashInfer wheels for GPU architecture ${arch}\.\.\."
     done
-    pass "--exp-b12x preserves explicit SM120 architecture selections"
+    pass "--exp-b12x preserves explicit Blackwell architecture selections"
 }
 
 test_exp_b12x_rebuilds_mismatched_cached_flashinfer_arch() {
@@ -632,27 +635,49 @@ test_exp_b12x_rebuilds_mismatched_cached_vllm_arch() {
     pass "--exp-b12x does not reuse a vLLM wheel for another architecture"
 }
 
-test_dockerfile_preserves_selected_sm12x_target() {
-    local sm12x_block="$TMP_BASE/sm12x-block"
+test_dockerfile_preserves_selected_blackwell_target() {
+    local blackwell_block="$TMP_BASE/blackwell-block"
+    local patch_fixture="$TMP_BASE/blackwell-patch"
 
     sed -n '/# CUDA 13 vLLM builds normally collapse/,/# TEMPORARY PATCH: vLLM PR #47914/p' \
-        "$PROJECT_DIR/Dockerfile" > "$sm12x_block"
+        "$PROJECT_DIR/Dockerfile" > "$blackwell_block"
     for expected in \
         'VLLM_PRESERVE_SM12X_TARGET="${VLLM_PRESERVE_SM12X_TARGET}"' \
         '/tmp/vllm-patches/patch_vllm_preserve_sm12x_target.py'; do
-        if ! grep -Fq "$expected" "$sm12x_block"; then
-            fail "Dockerfile SM12x build guard is missing: $expected"
+        if ! grep -Fq "$expected" "$blackwell_block"; then
+            fail "Dockerfile Blackwell build guard is missing: $expected"
         fi
     done
     for expected in \
-        '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1"' \
-        'Enabled selected SM12x target preservation for CUDA 13 vLLM build'; do
+        '"7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.3;11.0;12.0;12.1"' \
+        'Enabled selected SM103 and SM12x targets for CUDA 13 vLLM build'; do
         if ! grep -Fq "$expected" \
             "$PROJECT_DIR/docker/patch_vllm_preserve_sm12x_target.py"; then
-            fail "External SM12x patch is missing: $expected"
+            fail "External Blackwell patch is missing: $expected"
         fi
     done
-    pass "B12X preserves the selected SM12x target under CUDA 13"
+
+    mkdir -p "$patch_fixture"
+    printf '%s\n' \
+        'set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")' \
+        > "$patch_fixture/CMakeLists.txt"
+    VLLM_PRESERVE_SM12X_TARGET=1 python3 \
+        "$PROJECT_DIR/docker/patch_vllm_preserve_sm12x_target.py" \
+        "$patch_fixture" > "$patch_fixture/output.log"
+    if ! grep -Fq \
+        'set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.3;11.0;12.0;12.1")' \
+        "$patch_fixture/CMakeLists.txt"; then
+        fail "Blackwell patch did not add both CUDA 13 subarchitectures"
+    fi
+    VLLM_PRESERVE_SM12X_TARGET=1 python3 \
+        "$PROJECT_DIR/docker/patch_vllm_preserve_sm12x_target.py" \
+        "$patch_fixture" >> "$patch_fixture/output.log"
+    if ! grep -Fq \
+        'CUDA 13 Blackwell subarchitecture allow-list already present; skipping' \
+        "$patch_fixture/output.log"; then
+        fail "Blackwell patch is not idempotent"
+    fi
+    pass "B12X preserves selected SM103 and SM12x targets under CUDA 13"
 }
 
 test_custom_torch_versions_are_forwarded() {
@@ -918,10 +943,10 @@ test_exp_b12x_respects_custom_tag
 test_exp_b12x_rejects_use_wheels
 test_exp_b12x_rejects_preset_overrides
 test_exp_b12x_variable_names_are_generic
-test_exp_b12x_supports_sm120_arches
+test_exp_b12x_preserves_blackwell_arches
 test_exp_b12x_rebuilds_mismatched_cached_flashinfer_arch
 test_exp_b12x_rebuilds_mismatched_cached_vllm_arch
-test_dockerfile_preserves_selected_sm12x_target
+test_dockerfile_preserves_selected_blackwell_target
 test_custom_torch_versions_are_forwarded
 test_local_inference_lab_b12x_applies_to_any_ref
 test_local_inference_lab_b12x_requires_torch_212

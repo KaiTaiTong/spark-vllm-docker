@@ -468,11 +468,11 @@ RUN python3 /tmp/vllm-patches/patch_vllm_flashinfer_b12x_swigluoai.py .
 # also handles rebases, cherry-picks, and builds that already include the fix.
 RUN python3 /tmp/vllm-patches/patch_vllm_topk_softplus_sqrt_control_flow.py .
 
-# CUDA 13 vLLM builds normally collapse a requested 12.1a target to the
-# generic 12.0 entry. Adding 12.1 to the supported set preserves the selected
-# SM12x target through CMake's intersection logic: 12.1a remains 12.1a, while
-# explicitly selected 12.0a and 12.0f targets remain unchanged. Keep this
-# opt-in so the standard upstream build retains its own architecture policy.
+# CUDA 13 vLLM builds normally collapse requested subarchitectures to generic
+# family entries: 10.3a becomes 10.0 and 12.1a becomes 12.0. Add 10.3 and 12.1
+# to the supported set so CMake preserves the selected target and its a/f
+# suffix. Keep this opt-in so the standard upstream build retains its own
+# architecture policy.
 RUN VLLM_PRESERVE_SM12X_TARGET="${VLLM_PRESERVE_SM12X_TARGET}" \
     python3 /tmp/vllm-patches/patch_vllm_preserve_sm12x_target.py .
 

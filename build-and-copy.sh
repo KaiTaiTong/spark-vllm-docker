@@ -1138,9 +1138,9 @@ if [ "$NO_BUILD" = false ]; then
             fi
 
             if [ "$EXP_B12X" = true ]; then
-                # Preserve the selected SM12x target. This prevents 12.1a from
-                # being reduced to plain sm_120 without overriding explicit
-                # --gpu-arch 12.0a or 12.0f selections.
+                # Preserve selected Blackwell subarchitectures. This prevents
+                # 10.3a and 12.1a from being reduced to plain sm_100/sm_120
+                # without overriding explicit family-target selections.
                 VLLM_CMD+=("--build-arg" "VLLM_PRESERVE_SM12X_TARGET=1")
             fi
 
