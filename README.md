@@ -168,6 +168,13 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-08-12
+
+#### PyTorch 2.13 and CUTLASS DSL 4.7
+
+Regular and B12X builds now use PyTorch 2.13.0, torchvision 0.28.0,
+torchaudio 2.11.0, and CUTLASS DSL 4.7.0. 
+
 ### 2026-08-11
 
 #### Nemotron 3.5 Lightning recipe
@@ -259,9 +266,9 @@ resolution.
 
 `build-and-copy.sh` can now build vLLM from a fork with `--vllm-repo`. Custom repositories bypass the shared upstream Git checkout cache, force a vLLM source build, and suppress the Dockerfile's upstream preset PRs unless `--apply-preset-vllm-prs` is explicitly requested.
 
-`--torch-version`, `--torchvision-version`, and `--torchaudio-version` select the packages installed in both the source-build environment and final runner image. The torchvision and torchaudio versions remain resolver-selected when their flags are omitted; `--torchaudio-version none` omits torchaudio when a matching wheel is unavailable.
+`--torch-version`, `--torchvision-version`, and `--torchaudio-version` select the packages installed in both the source-build environment and final runner image. The defaults are PyTorch 2.13.0, torchvision 0.28.0, and torchaudio 2.11.0, matching current upstream vLLM CUDA requirements.
 
-Builds from any ref in `local-inference-lab/vllm` also clone and build the `master` ref of `lukealonso/b12x` automatically. The repository produces the `b12x` distribution. The source layer is refreshed on every applicable runner build so a previously cached clone cannot hide newer upstream commits. Only the locally built B12X wheel is installed: its shared dependencies come from vLLM so API-sensitive pins such as CUTLASS DSL are not upgraded out from under the selected vLLM revision. The checked-out commit is recorded at `/workspace/b12x-source-commit` in the image. B12X kernels remain JIT-compiled at runtime; building its Python wheel does not add another CUDA compilation phase to the image build.
+Builds from any ref in `local-inference-lab/vllm` also clone and build the `master` ref of `lukealonso/b12x` automatically. The repository produces the `b12x` distribution. The source layer is refreshed on every applicable runner build so a previously cached clone cannot hide newer upstream commits. Only the locally built B12X wheel is installed. Its CUTLASS DSL metadata is adjusted to the image-wide 4.7.0 pin before installation. The checked-out commit is recorded at `/workspace/b12x-source-commit` in the image. B12X kernels remain JIT-compiled at runtime; building its Python wheel does not add another CUDA compilation phase to the image build.
 
 ### 2026-07-10
 
@@ -1473,7 +1480,7 @@ Only regular vLLM wheels are downloaded from the published wheel release.
 `--exp-b12x` is therefore incompatible with `--use-wheels`: use bare
 `--exp-b12x` for the published image or add `--rebuild-vllm` for a source build.
 
-For any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `b12x` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. The install uses `--no-deps` to preserve the dependency versions selected by vLLM, including its CUTLASS DSL pin, and records the exact source commit at `/workspace/b12x-source-commit`. B12X requires PyTorch 2.12 or newer.
+For any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `b12x` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. Before the `--no-deps` install, its package metadata is updated to the image-wide CUTLASS DSL 4.7.0 pin. The exact source commit is recorded at `/workspace/b12x-source-commit`. B12X requires PyTorch 2.12 or newer; the preset uses 2.13.0.
 
 **Copy existing image without rebuilding:**
 
@@ -1495,9 +1502,9 @@ For any branch, tag, or commit selected from `local-inference-lab/vllm`, the run
 | `--force-download` | Force download all prebuilt wheels, skipping cached wheel checks |
 | `--vllm-repo <url>` | vLLM Git repository. Defaults to `https://github.com/vllm-project/vllm.git`; custom repositories bypass the shared checkout cache and force a source build. |
 | `--vllm-ref <ref>` | vLLM commit SHA, branch or tag (default: `main`) |
-| `--torch-version <version>` | PyTorch version installed in source-build and runner stages (default: `2.11.0`) |
-| `--torchvision-version <version>` | Optional torchvision version; compatible version is resolver-selected when omitted |
-| `--torchaudio-version <version>` | Optional torchaudio version; compatible version is resolver-selected when omitted. Use `none` to omit torchaudio. |
+| `--torch-version <version>` | PyTorch version installed in source-build and runner stages (default: `2.13.0`) |
+| `--torchvision-version <version>` | Optional torchvision version (default: `0.28.0`) |
+| `--torchaudio-version <version>` | Optional torchaudio version (default: `2.11.0`; use `none` to omit it) |
 | `--flashinfer-ref <ref>` | FlashInfer commit SHA, branch or tag (default: `main`) |
 | `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during build. Can be specified multiple times. |
 | `--apply-preset-vllm-prs` | Apply preset vLLM PRs even when `--vllm-repo`, `--vllm-ref`, or `--apply-vllm-pr` would otherwise suppress them |

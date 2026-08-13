@@ -529,7 +529,7 @@ test_exp_b12x_rebuild_vllm_uses_preset_source_build() {
     setup_fixture
     run_build --exp-b12x --rebuild-vllm || fail "--exp-b12x --rebuild-vllm run failed"
     assert_log_not_contains '^docker pull eugr/spark-vllm-b12x:latest$'
-    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.12.0 --build-arg TORCHVISION_VERSION=0.27.0 --build-arg TORCHAUDIO_VERSION=none .*--build-arg VLLM_REF=dev/gilded-gnosis --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/gilded-gnosis --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1'
     assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
     assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
     assert_log_not_contains 'Dockerfile\.mxfp4'
@@ -710,8 +710,9 @@ test_local_inference_lab_b12x_requires_torch_212() {
     setup_fixture
     if run_build \
         --vllm-repo https://github.com/local-inference-lab/vllm.git \
-        --vllm-ref dev/spark-fixes-7-14; then
-        fail "local-inference-lab B12X build unexpectedly accepted the default Torch 2.11"
+        --vllm-ref dev/spark-fixes-7-14 \
+        --torch-version 2.11.0; then
+        fail "local-inference-lab B12X build unexpectedly accepted Torch 2.11"
     fi
     assert_log_not_contains '^docker build'
     assert_output_contains 'Error: https://github\.com/local-inference-lab/vllm requires --torch-version 2\.12\.0 or newer for B12X \(got 2\.11\.0\)\.'
@@ -739,7 +740,30 @@ test_dockerfile_uses_configurable_torch_versions() {
        [ "$(grep -Fc 'echo "torchaudio==${PINNED_TORCHAUDIO}"' "$PROJECT_DIR/Dockerfile")" -ne 2 ]; then
         fail "Dockerfile does not preserve the selected Torch-family versions during later installs"
     fi
+    for expected in \
+        'ARG TORCH_VERSION=2.13.0' \
+        'ARG TORCHVISION_VERSION=0.28.0' \
+        'ARG TORCHAUDIO_VERSION=2.11.0'; do
+        if ! grep -Fq "$expected" "$PROJECT_DIR/Dockerfile"; then
+            fail "Dockerfile is missing Torch-family default: $expected"
+        fi
+    done
     pass "Dockerfile uses configurable Torch package versions in build and runner stages"
+}
+
+test_dockerfile_pins_cutlass_dsl_47_everywhere() {
+    for expected in \
+        'ARG CUTLASS_DSL_VERSION=4.7.0' \
+        '"nvidia-cutlass-dsl[cu13]==$CUTLASS_DSL_VERSION"' \
+        'echo "nvidia-cutlass-dsl[cu13]==${CUTLASS_DSL_VERSION}" >> /tmp/wheel-override.txt' \
+        'echo "nvidia-cutlass-dsl[cu13]==${CUTLASS_DSL_VERSION}" >> /tmp/torch-override.txt' \
+        '"$CUTLASS_DSL_VERSION" --expected-count 1 requirements/cuda.txt' \
+        '--expected-count 5 /tmp/b12x-source/pyproject.toml'; do
+        if ! grep -Fq -- "$expected" "$PROJECT_DIR/Dockerfile"; then
+            fail "Dockerfile is missing CUTLASS DSL 4.7 enforcement: $expected"
+        fi
+    done
+    pass "Dockerfile pins CUTLASS DSL 4.7 in regular and B12X builds"
 }
 
 test_dockerfile_uses_profiled_named_wheel_contexts() {
@@ -952,6 +976,7 @@ test_local_inference_lab_b12x_applies_to_any_ref
 test_local_inference_lab_b12x_requires_torch_212
 test_dockerfile_custom_repo_bypasses_shared_cache
 test_dockerfile_uses_configurable_torch_versions
+test_dockerfile_pins_cutlass_dsl_47_everywhere
 test_dockerfile_uses_profiled_named_wheel_contexts
 test_dockerfile_builds_and_verifies_b12x_source
 test_copied_vllm_git_index_is_refreshed_before_patch_apply
