@@ -18,7 +18,7 @@ defaults:
   gpu_memory_utilization: 0.7
   max_model_len: 1048576
   max_num_batched_tokens: 16384
-  num_speculative_tokens: 3
+  num_speculative_tokens: 7
 
 command: |
   vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \

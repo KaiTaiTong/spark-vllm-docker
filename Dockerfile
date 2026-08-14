@@ -118,6 +118,12 @@ ARG FLASHINFER_CUDA_ARCH_LIST="12.1a"
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 WORKDIR $VLLM_BASE_DIR
 ARG FLASHINFER_REF=main
+ARG FLASHINFER_BUILD_PYTHON=/usr/bin/python3
+
+# FlashInfer's source checkout may carry a .python-version. Keep no-isolation
+# builds on the prepared system interpreter instead of letting upstream source
+# select a separate uv-managed Python without the installed build dependencies.
+ENV UV_PYTHON_DOWNLOADS=never
 
 # --- CACHE BUSTER ---
 # Change this argument to force a re-download of FlashInfer
@@ -125,7 +131,7 @@ ARG CACHEBUST_FLASHINFER=1
 
 # Additional deps
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-     uv pip install packaging
+     uv pip install --python "$FLASHINFER_BUILD_PYTHON" packaging filelock
 
 # Smart Git Clone (Fetch changes instead of full re-clone)
 RUN --mount=type=cache,id=repo-cache,target=/repo-cache \
@@ -226,12 +232,13 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     patch -p1 < flashinfer_cache.patch && \
     # flashinfer-python
     sed -i -e 's/license = "Apache-2.0"/license = { text = "Apache-2.0" }/' -e '/license-files/d' pyproject.toml && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
+    "$FLASHINFER_BUILD_PYTHON" -c 'import filelock, packaging, requests, torch, tqdm' && \
+    uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # flashinfer-cubin
-    cd flashinfer-cubin && uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
+    cd flashinfer-cubin && uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # flashinfer-jit-cache
     cd ../flashinfer-jit-cache && \
-    uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
+    uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # dump git ref and target architecture in the wheels dir
     cd .. && \
     git rev-parse HEAD > /workspace/wheels/.flashinfer-commit && \

@@ -873,6 +873,31 @@ test_dockerfile_applies_flashinfer_prs_without_merging_branch_history() {
     pass "FlashInfer PRs apply as patches without merging branch history"
 }
 
+test_dockerfile_uses_prepared_python_for_flashinfer_builds() {
+    local flashinfer_builder_block="$TMP_BASE/flashinfer-builder-block"
+
+    sed -n '/FROM base AS flashinfer-builder/,/FROM scratch AS flashinfer-export/p' \
+        "$PROJECT_DIR/Dockerfile" > "$flashinfer_builder_block"
+
+    for expected in \
+        'ARG FLASHINFER_BUILD_PYTHON=/usr/bin/python3' \
+        'ENV UV_PYTHON_DOWNLOADS=never' \
+        'uv pip install --python "$FLASHINFER_BUILD_PYTHON" packaging filelock' \
+        '"$FLASHINFER_BUILD_PYTHON" -c '\''import filelock, packaging, requests, torch, tqdm'\'''; do
+        if ! grep -Fq "$expected" "$flashinfer_builder_block"; then
+            fail "FlashInfer builder does not prepare its selected Python consistently: $expected"
+        fi
+    done
+
+    if [ "$(grep -Fc 'uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation' "$flashinfer_builder_block")" -ne 3 ]; then
+        fail "FlashInfer builder does not use the prepared Python for all three wheel builds"
+    fi
+    if grep -Fq 'uv build --no-build-isolation' "$flashinfer_builder_block"; then
+        fail "FlashInfer builder still contains a build that can honor upstream .python-version"
+    fi
+    pass "FlashInfer wheel builds use the prepared system Python"
+}
+
 test_dockerfiles_pin_tvm_ffi_regression_version() {
     if [ "$(grep -Fc 'apache-tvm-ffi==0.1.12' "$PROJECT_DIR/Dockerfile")" -ne 2 ] || \
        [ "$(grep -Fc 'apache-tvm-ffi==0.1.12' "$PROJECT_DIR/Dockerfile.mxfp4")" -ne 1 ]; then
@@ -981,6 +1006,7 @@ test_dockerfile_uses_profiled_named_wheel_contexts
 test_dockerfile_builds_and_verifies_b12x_source
 test_copied_vllm_git_index_is_refreshed_before_patch_apply
 test_dockerfile_applies_flashinfer_prs_without_merging_branch_history
+test_dockerfile_uses_prepared_python_for_flashinfer_builds
 test_dockerfiles_pin_tvm_ffi_regression_version
 test_dockerfile_fetches_vllm_prs_from_upstream
 test_dockerfile_externalizes_vllm_source_patches
