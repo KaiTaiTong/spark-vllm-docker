@@ -168,6 +168,12 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-08-14
+
+#### B12X source branch update
+
+B12X source builds now use `local-inference-lab/vllm@dev/infernal-invocation`.
+
 ### 2026-08-12
 
 #### PyTorch 2.13 and CUTLASS DSL 4.7
@@ -204,7 +210,7 @@ Added the cluster-only `recipes/8x-spark-cluster/glm-5.2-nvfp4.yaml` recipe for 
 
 #### New B12X image
 
-Added `--exp-b12x` (alias: `--experimental-b12x`) as an alternative version built from [a fork by Luke Alonso](https://github.com/local-inference-lab/vllm/tree/dev/gilded-gnosis). This fork supports a collection of experimental high-performance B12X kernels for sm12x architecture. 
+Added `--exp-b12x` (alias: `--experimental-b12x`) as an alternative version built from [a fork by Luke Alonso](https://github.com/local-inference-lab/vllm/tree/dev/infernal-invocation). This fork supports a collection of experimental high-performance B12X kernels for sm12x architecture.
 
 Since it is built from a forked vLLM branch, it will be supported in parallel to the main ("regular") build, at least for the time being.
 
@@ -1443,7 +1449,7 @@ For the maintained experimental B12X combination, the equivalent shortcut is:
 
 Without local-build flags, this pulls `eugr/spark-vllm-b12x:latest` and tags it
 as `vllm-node-b12x` unless `-t` is supplied. To build the maintained combination
-from `local-inference-lab/vllm@dev/gilded-gnosis` and the `master` branch of the
+from `local-inference-lab/vllm@dev/infernal-invocation` and the `master` branch of the
 B12X repository, run:
 
 ```bash
