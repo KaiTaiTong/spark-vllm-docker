@@ -358,6 +358,7 @@ ARG VLLM_PRESET_PRS=""
 ARG VLLM_APPLY_PRESET_PRS=""
 ARG VLLM_PRS=""
 ARG VLLM_PRESERVE_SM12X_TARGET=0
+ARG VLLM_PATCH_B12X_C128A_ALIGNMENT=0
 
 # PR refs include the branch history they were developed on. Use upstream main
 # only to identify each PR's patch range, then apply that patch to VLLM_REF.
@@ -471,6 +472,14 @@ RUN set -eux; \
 # It is also safe for older refs (backend absent) and refs that already contain
 # the fix (idempotent); unknown partial source shapes fail the build.
 COPY docker/patch_vllm_*.py docker/pin_cutlass_dsl.py /tmp/vllm-patches/
+
+# TEMPORARY PATCH: local-inference-lab/vllm commit ad848fc41 added a dynamic
+# DeepSeek V4 C128A top-k width but omitted the alignment constant import.
+# Keep this B12X-only and source-aware so it skips refs where the bug is absent
+# or already fixed. Remove after the oldest supported B12X ref contains a fix.
+RUN VLLM_PATCH_B12X_C128A_ALIGNMENT="${VLLM_PATCH_B12X_C128A_ALIGNMENT}" \
+    python3 /tmp/vllm-patches/patch_vllm_b12x_c128a_topk_alignment.py .
+
 RUN python3 /tmp/vllm-patches/patch_vllm_flashinfer_b12x_swigluoai.py .
 
 # TEMPORARY PATCH: vLLM PR #49408 / commit d6dbdb9 misplaced the XPU-only

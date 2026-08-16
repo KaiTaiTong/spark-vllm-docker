@@ -1146,6 +1146,7 @@ if [ "$NO_BUILD" = false ]; then
                 # 10.3a and 12.1a from being reduced to plain sm_100/sm_120
                 # without overriding explicit family-target selections.
                 VLLM_CMD+=("--build-arg" "VLLM_PRESERVE_SM12X_TARGET=1")
+                VLLM_CMD+=("--build-arg" "VLLM_PATCH_B12X_C128A_ALIGNMENT=1")
             fi
 
             VLLM_CMD+=(".")

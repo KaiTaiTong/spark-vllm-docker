@@ -511,6 +511,7 @@ test_custom_vllm_repo_forces_source_build() {
     assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=main --build-arg VLLM_REPO=https://github.com/example/vllm.git --build-arg VLLM_APPLY_PRESET_PRS=0'
     assert_log_contains '^docker build -t vllm-node .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/custom '
     assert_log_not_contains 'B12X_REPO='
+    assert_log_not_contains 'VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
     assert_output_contains 'Rebuilding vLLM wheels \(--vllm-repo specified\)\.\.\.'
     assert_output_contains 'Skipping preset vLLM PRs because --vllm-repo, --vllm-ref, or --apply-vllm-pr was specified\.'
     pass "--vllm-repo forces a source build and suppresses upstream preset PRs"
@@ -529,7 +530,7 @@ test_exp_b12x_rebuild_vllm_uses_preset_source_build() {
     setup_fixture
     run_build --exp-b12x --rebuild-vllm || fail "--exp-b12x --rebuild-vllm run failed"
     assert_log_not_contains '^docker pull eugr/spark-vllm-b12x:latest$'
-    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/infernal-invocation --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/infernal-invocation --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1 --build-arg VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
     assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
     assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
     assert_log_not_contains 'Dockerfile\.mxfp4'
@@ -633,6 +634,78 @@ test_exp_b12x_rebuilds_mismatched_cached_vllm_arch() {
     assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a '
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset\)\.\.\.'
     pass "--exp-b12x does not reuse a vLLM wheel for another architecture"
+}
+
+test_b12x_c128a_alignment_patch_is_guarded_and_idempotent() {
+    local patch_script="$PROJECT_DIR/docker/patch_vllm_b12x_c128a_topk_alignment.py"
+    local patch_fixture="$TMP_BASE/b12x-c128a-patch"
+    local target_dir="$patch_fixture/vllm/models/deepseek_v4"
+    local helper_dir="$patch_fixture/vllm/v1/attention/backends/mla"
+    local target="$target_dir/sparse_mla.py"
+    local helper="$helper_dir/compressor_utils.py"
+    local output="$patch_fixture/output.log"
+    local unknown_fixture="$TMP_BASE/b12x-c128a-unknown"
+
+    mkdir -p "$target_dir" "$helper_dir"
+    cat > "$target" <<'PY'
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_c128a_topk_width,
+    get_compressed_slot_mapping,
+)
+
+
+def active_width(value: int) -> int:
+    return max(value, _C128A_TOPK_ALIGNMENT)
+PY
+    cat > "$helper" <<'PY'
+_C128A_TOPK_ALIGNMENT = 128
+
+
+def get_c128a_topk_width():
+    pass
+
+
+def get_compressed_slot_mapping():
+    pass
+PY
+    cp -a "$patch_fixture" "$unknown_fixture"
+    sed -i 's/_C128A_TOPK_ALIGNMENT = 128/_C128A_TOPK_ALIGNMENT = 64/' \
+        "$unknown_fixture/vllm/v1/attention/backends/mla/compressor_utils.py"
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=0 python3 "$patch_script" \
+        "$patch_fixture" > "$output"
+    if grep -Fq '    _C128A_TOPK_ALIGNMENT,' "$target"; then
+        fail "B12X C128A patch changed source while its build guard was disabled"
+    fi
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$patch_fixture" >> "$output"
+    if [ "$(grep -Fc '    _C128A_TOPK_ALIGNMENT,' "$target")" -ne 1 ]; then
+        fail "B12X C128A patch did not add exactly one alignment import"
+    fi
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$patch_fixture" >> "$output"
+    if ! grep -Fq \
+        'DeepSeek V4 C128A alignment is already defined or imported; skipping' \
+        "$output"; then
+        fail "B12X C128A patch is not idempotent"
+    fi
+
+    if VLLM_PATCH_B12X_C128A_ALIGNMENT=invalid python3 "$patch_script" \
+        "$patch_fixture" >> "$output" 2>&1; then
+        fail "B12X C128A patch accepted an invalid build guard"
+    fi
+
+    if VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$unknown_fixture" >> "$output" 2>&1; then
+        fail "B12X C128A patch accepted an unexpected helper constant"
+    fi
+    if grep -Fq '    _C128A_TOPK_ALIGNMENT,' \
+        "$unknown_fixture/vllm/models/deepseek_v4/sparse_mla.py"; then
+        fail "B12X C128A patch mutated an unknown source shape"
+    fi
+    pass "B12X C128A alignment workaround is guarded and idempotent"
 }
 
 test_dockerfile_preserves_selected_blackwell_target() {
@@ -938,8 +1011,8 @@ test_dockerfile_externalizes_vllm_source_patches() {
             fail "Dockerfile does not execute external patch: $patch_name"
         fi
     done
-    if [ "$patch_count" -ne 10 ]; then
-        fail "Expected 10 external vLLM patch scripts, found $patch_count"
+    if [ "$patch_count" -ne 11 ]; then
+        fail "Expected 11 external vLLM patch scripts, found $patch_count"
     fi
     if ! python3 -c '
 from pathlib import Path
@@ -995,6 +1068,7 @@ test_exp_b12x_variable_names_are_generic
 test_exp_b12x_preserves_blackwell_arches
 test_exp_b12x_rebuilds_mismatched_cached_flashinfer_arch
 test_exp_b12x_rebuilds_mismatched_cached_vllm_arch
+test_b12x_c128a_alignment_patch_is_guarded_and_idempotent
 test_dockerfile_preserves_selected_blackwell_target
 test_custom_torch_versions_are_forwarded
 test_local_inference_lab_b12x_applies_to_any_ref
