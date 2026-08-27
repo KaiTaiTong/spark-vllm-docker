@@ -806,6 +806,7 @@ test_mrv2_speculator_cudagraph_pool_patch_is_guarded_and_idempotent() {
     local target="$target_dir/cudagraph_utils.py"
     local output="$patch_fixture/output.log"
     local unknown_fixture="$TMP_BASE/mrv2-speculator-cudagraph-pool-unknown"
+    local equivalent_fixture="$TMP_BASE/mrv2-speculator-cudagraph-pool-equivalent"
 
     mkdir -p "$target_dir"
     cat > "$target" <<'PY'
@@ -857,6 +858,63 @@ PY
         'Equivalent MRV2 speculator CUDA-graph pool fix is present; skipping' \
         "$output"; then
         fail "MRV2 speculator pool patch did not report its idempotent skip"
+    fi
+
+    local equivalent_target="$equivalent_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"
+    mkdir -p "$(dirname "$equivalent_target")"
+    cat > "$equivalent_target" <<'PY'
+from typing import Any
+
+
+class CudaGraphManager:
+    pass
+
+
+def _profiling_cudagraph_managers(runner) -> list[CudaGraphManager]:
+    managers = [runner.cudagraph_manager]
+    speculator = runner.speculator
+    if speculator is not None:
+        for name in ("prefill_cudagraph_manager", "decode_cudagraph_manager"):
+            candidate = getattr(speculator, name, None)
+            if isinstance(candidate, CudaGraphManager):
+                managers.append(candidate)
+    return managers
+
+
+def profile_cudagraph_memory(runner):
+    """PIECEWISE, encoder and speculator graphs are measured in full."""
+    manager = runner.cudagraph_manager
+    all_wrappers: list[Any] = []
+    original_pools: dict[int, Any] = {}
+    graph_managers = _profiling_cudagraph_managers(runner)
+    original_manager_pools = {
+        id(graph_manager): graph_manager.pool for graph_manager in graph_managers
+    }
+    try:
+        manager.pool = current_platform.graph_pool_handle()
+        for graph_manager in graph_managers:
+            graph_manager.pool = manager.pool
+        if manager.use_breakable_cg:
+            pass
+    finally:
+        CUDAGraphWrapper.clear_all_graphs()
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        for graph_manager in graph_managers:
+            graph_manager.graphs.clear()
+            graph_manager.pool = original_manager_pools[id(graph_manager)]
+        for wrapper in all_wrappers:
+            pass
+PY
+    local equivalent_before equivalent_after
+    equivalent_before=$(sha256sum "$equivalent_target")
+    python3 "$patch_script" "$equivalent_fixture" >> "$output"
+    equivalent_after=$(sha256sum "$equivalent_target")
+    if [ "$equivalent_before" != "$equivalent_after" ]; then
+        fail "MRV2 speculator pool patch modified an equivalent manager-collection fix"
+    fi
+    if ! tail -n 1 "$output" | grep -Fq \
+        'Equivalent MRV2 speculator CUDA-graph pool fix is present; skipping'; then
+        fail "MRV2 speculator pool patch did not recognize the manager-collection fix"
     fi
 
     local unknown_target="$unknown_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"

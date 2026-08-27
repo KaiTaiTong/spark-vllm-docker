@@ -68,12 +68,25 @@ class PatchError(RuntimeError):
 
 
 def is_fixed(source: str) -> bool:
-    return (
+    local_fix = (
         MARKER in source
         and "speculator_manager.pool = manager.pool" in source
         and "speculator_manager.graphs.clear()" in source
         and "setattr(runner.speculator, name, None)" in source
     )
+    manager_collection_fix = all(
+        anchor in source
+        for anchor in (
+            "def _profiling_cudagraph_managers(",
+            "speculator = runner.speculator",
+            "candidate = getattr(speculator, name, None)",
+            "graph_managers = _profiling_cudagraph_managers(runner)",
+            "graph_manager.pool = manager.pool",
+            "graph_manager.graphs.clear()",
+            "graph_manager.pool = original_manager_pools[id(graph_manager)]",
+        )
+    )
+    return local_fix or manager_collection_fix
 
 
 def is_affected_profiler(source: str) -> bool:
