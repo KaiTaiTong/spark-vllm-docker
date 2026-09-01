@@ -168,6 +168,14 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-08-27
+
+#### InstantTensor zero-copy loader mod
+
+Added the opt-in `instanttensor-zero-copy` mod for memory-constrained model
+loads. It disables vLLM's per-tensor InstantTensor ownership clone while
+retaining InstantTensor's required ring buffer. Use with caution.
+
 ### 2026-08-25
 
 #### Local vLLM source checkouts
@@ -1972,6 +1980,7 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **nemotron-nano/** and **nemotron-super/**: Nemotron reasoning parser and model support helpers.
 - **inkling-sm12-paged-kv/**: Routes Inkling's SM12 paged-KV relative attention through a vendored FA4 implementation while leaving other models and GPU architectures unchanged.
 - **instanttensor-hybrid-draft-loader/**: Keeps a target model on InstantTensor while using lazy safetensors for eligible speculative draft weights, including embedded MTP drafts.
+- **instanttensor-zero-copy/**: Experimentally avoids InstantTensor's per-tensor ownership clone for model loaders that consume each yielded weight inline; the ring buffer still must fit the largest checkpoint tensor.
 - **exp-b12x/**: Experimental FlashInfer b12x support for builds that include the required upstream vLLM support.
 - **use-official-vllm/**: Installs `git`, `earlyoom`, InstantTensor, and SciPy inside official vLLM containers (Ubuntu/Debian-based) so that other mods can rely on `git apply`, the launcher can use `--earlyoom`, and vLLM can use `--load-format instanttensor` and SciPy-based functionality. The Python install preserves the image's existing Torch build. The mod also redirects the pip-installed NCCL library to the system `libnccl2` library to avoid DGX Spark multi-node NCCL hangs. Apply this mod first when using official vLLM images (e.g. `vllm-openai`).
 
