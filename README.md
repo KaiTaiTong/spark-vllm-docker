@@ -135,7 +135,7 @@ To launch the model:
   --gpu-memory-utilization 0.8 \
   -tp 2 \
   --max-model-len 128000 \
-  --load-format fastsafetensors \
+  --load-format instanttensor \
   --enable-auto-tool-choice --tool-call-parser minimax_m2 \
   --reasoning-parser minimax_m2
 ```
@@ -167,6 +167,21 @@ Don't do it every time you rebuild, because it will slow down compilation times.
 For periodic maintenance, I recommend using a filter: `docker builder prune --filter until=72h`
 
 ## CHANGELOG
+
+### 2026-09-04
+
+#### GLM 5.3 Flash dual-Spark recipe
+
+Added the cluster-only `glm-5.3-flash` recipe for serving
+`local-inference-lab/GLM-5.3-Flash-NVFP4-Spark` on two DGX Spark nodes. It uses the B12X container with MTP and 1M context.
+
+For a first-time cluster setup, discover the nodes and then let the recipe
+prepare and distribute the B12X image and model:
+
+```bash
+./run-recipe.sh --discover
+./run-recipe.sh glm-5.3-flash --setup
+```
 
 ### 2026-08-27
 
