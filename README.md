@@ -1524,7 +1524,7 @@ For the maintained experimental B12X combination, the equivalent shortcut is:
 
 Without local-build flags, this pulls `eugr/spark-vllm-b12x:latest` and tags it
 as `vllm-node-b12x` unless `-t` is supplied. To build the maintained combination
-from `local-inference-lab/vllm@dev/infernal-invocation` and the `master` branch of the
+from `local-inference-lab/vllm@dev/jovian-judgement` and the `master` branch of the
 B12X repository, run:
 
 ```bash
