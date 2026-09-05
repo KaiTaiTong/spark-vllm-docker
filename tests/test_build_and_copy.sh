@@ -493,6 +493,27 @@ test_apply_vllm_pr_skips_preset_prs_by_default() {
     pass "--apply-vllm-pr suppresses preset PRs by default"
 }
 
+test_apply_vllm_pr_url_is_forwarded_to_source_build() {
+    setup_fixture
+    local pr_url="https://github.com/local-inference-lab/vllm/pull/669"
+
+    run_build --apply-vllm-pr "${pr_url}/" \
+        || fail "full --apply-vllm-pr URL run failed"
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=main .*--build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRS=https://github.com/local-inference-lab/vllm/pull/669'
+    assert_output_contains 'Applying vLLM PRs: https://github\.com/local-inference-lab/vllm/pull/669'
+    pass "full --apply-vllm-pr URL is normalized and forwarded to the source build"
+}
+
+test_apply_vllm_pr_rejects_invalid_reference() {
+    setup_fixture
+    if run_build --apply-vllm-pr 'https://example.com/example/vllm/pull/1'; then
+        fail "invalid --apply-vllm-pr URL unexpectedly succeeded"
+    fi
+    assert_output_contains 'requires a positive integer PR number or full https://github\.com/OWNER/REPO/pull/NUMBER URL'
+    assert_log_not_contains '^docker build'
+    pass "invalid --apply-vllm-pr reference is rejected before build"
+}
+
 test_apply_vllm_pr_can_apply_preset_prs_explicitly() {
     setup_fixture
     run_build --apply-vllm-pr 12345 --apply-preset-vllm-prs || fail "custom and preset PR run failed"
@@ -1325,13 +1346,14 @@ test_dockerfile_fetches_vllm_prs_from_upstream() {
     sed -n '/ARG VLLM_PRS=""/,/# TEMPORARY PATCH: vLLM PR/p' "$PROJECT_DIR/Dockerfile" > "$vllm_pr_block"
     for expected in \
         'git remote add vllm-upstream "$VLLM_UPSTREAM_REPO"' \
-        'git fetch vllm-upstream +pull/${pr}/head:pr-${pr}' \
-        'git merge-base vllm-upstream/main pr-${pr}'; do
+        'git fetch vllm-upstream "+pull/${pr}/head:${pr_head}"' \
+        'git merge-base vllm-upstream/main "$pr_head"' \
+        'curl -fsSL --retry 3 --retry-delay 1 "${pr_url}.diff" -o "$patch_file"'; do
         if ! grep -Fq "$expected" "$vllm_pr_block"; then
-            fail "vLLM PR block does not use the dedicated upstream remote: $expected"
+            fail "vLLM PR block is missing reference-specific fetch logic: $expected"
         fi
     done
-    pass "vLLM PR patches are fetched from upstream when building a fork"
+    pass "vLLM PR patches use upstream for numbers and the named repository for URLs"
 }
 
 test_dockerfile_externalizes_vllm_source_patches() {
@@ -1394,6 +1416,8 @@ test_requested_flashinfer_prs_apply_to_selected_ref
 test_rebuild_vllm_applies_preset_prs_by_default
 test_vllm_ref_skips_preset_prs_by_default
 test_apply_vllm_pr_skips_preset_prs_by_default
+test_apply_vllm_pr_url_is_forwarded_to_source_build
+test_apply_vllm_pr_rejects_invalid_reference
 test_apply_vllm_pr_can_apply_preset_prs_explicitly
 test_vllm_ref_can_apply_preset_prs_explicitly
 test_apply_preset_prs_forces_vllm_rebuild
