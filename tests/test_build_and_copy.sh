@@ -482,7 +482,13 @@ test_rebuild_vllm_applies_preset_prs_by_default() {
     run_build --rebuild-vllm || fail "--rebuild-vllm run failed"
     assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=main .*--build-arg VLLM_APPLY_PRESET_PRS=1'
     assert_output_contains 'Applying preset vLLM PRs from the Dockerfile by default\.'
-    pass "ordinary main source rebuild applies preset PRs by default"
+    local preset_prs
+    preset_prs="$(sed -n 's/^ARG VLLM_PRESET_PRS="\([^"]*\)"$/\1/p' "$FIXTURE_DIR/Dockerfile")"
+    case " $preset_prs " in
+        *" 54788 "*) ;;
+        *) fail "regular Dockerfile presets do not include vLLM PR #54788" ;;
+    esac
+    pass "ordinary main source rebuild applies vLLM PR #54788 by default"
 }
 
 test_apply_vllm_pr_skips_preset_prs_by_default() {
