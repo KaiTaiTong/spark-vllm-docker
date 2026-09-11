@@ -168,6 +168,14 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
+### 2026-09-10
+
+#### Qwen3.8 Flash Next solo PLE disk offload
+
+The solo `qwen3.8-flash-next-nvfp4-solo` recipe now offloads PLE tables to disk
+with `VLLM_PLE_TABLE_MEMORY=disk` that allows 1M+ k/v cache allocation (the model max context size is still 262144).
+Default memory allocation is reduced to 0.8.
+
 ### 2026-09-08
 
 #### Qwen3.8 Flash Next solo and dual-Spark recipes

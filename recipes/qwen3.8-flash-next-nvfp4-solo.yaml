@@ -1,9 +1,10 @@
 # Recipe: Qwen3.8-Flash-Next-NVFP4 (solo)
-# Single-node configuration using the B12X-optimized serving stack.
+# Single-node configuration using the B12X-optimized serving stack with PLE
+# tables offloaded to disk.
 
 recipe_version: "1"
 name: Qwen3.8-Flash-Next-NVFP4 (Solo)
-description: vLLM serving local-inference-lab/Qwen3.8-Flash-Next-NVFP4 on one DGX Spark
+description: vLLM serving local-inference-lab/Qwen3.8-Flash-Next-NVFP4 on one DGX Spark with PLE disk offload
 
 model: local-inference-lab/Qwen3.8-Flash-Next-NVFP4
 container: vllm-node-b12x
@@ -21,14 +22,14 @@ defaults:
   tensor_parallel: 1
   pipeline_parallel: 1
   block_size: 16
-  kv_cache_memory_bytes: "6G"
   max_model_len: 262144
-  max_num_seqs: 2
+  max_num_seqs: 8
   max_num_batched_tokens: 4096
   num_speculative_tokens: 4
-  gpu_memory_utilization: 0.87
+  gpu_memory_utilization: 0.8
 
 env:
+  VLLM_PLE_TABLE_MEMORY: "disk"
   CUTE_DSL_ARCH: "sm_121a"
   SAFETENSORS_FAST_GPU: "1"
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
@@ -53,7 +54,6 @@ command: |
     --quantization modelopt_mixed \
     --block-size {block_size} \
     --load-format b12x \
-    --kv-cache-memory-bytes {kv_cache_memory_bytes} \
     --max-model-len {max_model_len} \
     --max-num-seqs {max_num_seqs} \
     --max-num-batched-tokens {max_num_batched_tokens} \
@@ -63,8 +63,6 @@ command: |
     --moe-backend b12x \
     --no-enable-flashinfer-autotune \
     --mm-encoder-tp-mode data \
-    --mm-processor-cache-gb 0 \
-    --limit-mm-per-prompt '{{"image":1}}' \
     --reasoning-parser qwen3 \
     --tool-call-parser qwen3_xml \
     --enable-auto-tool-choice \
