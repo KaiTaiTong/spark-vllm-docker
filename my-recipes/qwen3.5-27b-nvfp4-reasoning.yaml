@@ -1,0 +1,43 @@
+recipe_version: "1"
+name: Qwen3.5-27B-NVFP4-Reasoning (personal)
+description: vLLM serving local Qwen3.5-27B Claude Opus Reasoning Distilled NVFP4
+
+solo_only: true
+container: vllm-node-tf5
+
+build_args:
+  - --tf5
+
+mods:
+  - mods/fix-qwen3-coder-next
+  - mods/fix-qwen3.5-chat-template
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.50
+  max_model_len: 262144
+  max_num_batched_tokens: 16384
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: 1
+
+command: |
+  vllm serve /opt/llms/models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-NVFP4 \
+    --served-model-name qwen35-27b-nvfp4 \
+    --host {host} \
+    --port {port} \
+    --max-model-len {max_model_len} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --kv-cache-dtype fp8 \
+    --load-format fastsafetensors \
+    --attention-backend flashinfer \
+    --enable-prefix-caching \
+    --chat-template /opt/llms/models/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-NVFP4/chat_template.jinja \
+    --trust-remote-code \
+    -tp {tensor_parallel}
