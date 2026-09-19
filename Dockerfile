@@ -641,6 +641,11 @@ RUN python3 /tmp/vllm-patches/patch_vllm_routed_experts_weight_shape.py .
 # reservations behind just before vLLM sizes and allocates KV cache blocks.
 RUN python3 /tmp/vllm-patches/patch_vllm_spark_kv_cache_cleanup.py .
 
+# TEMPORARY PATCH: local-inference-lab/vllm 3d5f2b04 exports temporary MoE
+# tuning tensors as PreparedCall.owners, which b12x retains in serving plans.
+# Keep the trial lifetime in call closures so KV profiling can reclaim them.
+RUN python3 /tmp/vllm-patches/patch_vllm_b12x_moe_tuning_memory.py .
+
 # WSL guest RAM does not describe CUDA's allocation budget on UMA devices.
 # Keep the fix in exported wheels as well as the runner below.
 RUN python3 /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py .
@@ -798,8 +803,11 @@ ENV TIKTOKEN_ENCODINGS_BASE=$VLLM_BASE_DIR/tiktoken_encodings
 ENV PATH=$VLLM_BASE_DIR:$PATH
 # Enable vLLM's WSL2 pinned-memory path; override with -e VLLM_WSL2_ENABLE_PIN_MEMORY=0.
 ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
+# Limit InstantTensor's in-flight I/O to reduce GPU and pinned host buffer usage.
+# Override per launch with -e INSTANTTENSOR_IO_DEPTH=<depth>.
+ENV INSTANTTENSOR_IO_DEPTH=16
 # TODO: Make the B12X autotuning default architecture dependent.
-ENV B12X_AUTOTUNE=0
+# ENV B12X_AUTOTUNE=0
 
 
 # Final extra deps
@@ -825,24 +833,11 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # regular and B12X builds. B12X kernels remain JIT-compiled on first use;
 # building its Python wheel here does not compile the CUDA kernels.
 COPY docker/pin_cutlass_dsl.py /tmp/pin_cutlass_dsl.py
-# TEMPORARY: restore small-tile W4A8 occupancy until B12X PR #363 is merged.
-# https://github.com/local-inference-lab/b12x/pull/363
-# Bundled from commit 9dc276f8105cfbe2d5882a6475e6e96c9533911c.
-COPY docker/b12x-pr363-small-tile-barriers.patch /tmp/b12x-pr363.patch
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     if [ -n "$B12X_REPO" ]; then \
         echo "Refreshing B12X source (cache key: $B12X_CACHEBUST)" && \
         git clone --depth 1 --branch "$B12X_REF" "$B12X_REPO" /tmp/b12x-source && \
         B12X_COMMIT=$(git -C /tmp/b12x-source rev-parse HEAD) && \
-        if git -C /tmp/b12x-source apply --reverse --check /tmp/b12x-pr363.patch >/dev/null 2>&1; then \
-            echo "B12X PR #363 is already applied; skipping."; \
-        elif git -C /tmp/b12x-source apply --check /tmp/b12x-pr363.patch; then \
-            git -C /tmp/b12x-source apply /tmp/b12x-pr363.patch && \
-            echo "Applied B12X PR #363 small-tile W4A8 barrier specialization."; \
-        else \
-            echo "B12X PR #363 does not match this source; review the temporary patch before building." >&2; \
-            exit 1; \
-        fi && \
         python3 /tmp/pin_cutlass_dsl.py "$CUTLASS_DSL_VERSION" \
             --expected-count 5 /tmp/b12x-source/pyproject.toml && \
         uv pip install --reinstall --no-deps /tmp/b12x-source && \
@@ -861,6 +856,11 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # This also accepts wheels that already contain the source-stage patch.
 COPY docker/patch_vllm_wsl_cuda_uma.py /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py
 RUN python3 /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py --installed
+
+# InstantTensor must share vLLM's available-memory accounting on native UMA
+# and WSL. Apply after all package installs for regular, B12X, and wheel runners.
+COPY docker/patch_instanttensor_vllm_memory.py /tmp/instanttensor-patches/patch_instanttensor_vllm_memory.py
+RUN python3 /tmp/instanttensor-patches/patch_instanttensor_vllm_memory.py --installed
 
 # Enumerate Torch schema arguments once per fill_defaults call. Apply after all
 # package installs so regular, B12X, and precompiled-wheel runners retain the fix.

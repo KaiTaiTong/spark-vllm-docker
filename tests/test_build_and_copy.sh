@@ -651,20 +651,20 @@ test_exp_b12x_rebuild_vllm_uses_preset_source_build() {
     setup_fixture
     run_build --exp-b12x --rebuild-vllm || fail "--exp-b12x --rebuild-vllm run failed"
     assert_log_not_contains '^docker pull eugr/spark-vllm-b12x:latest$'
-    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/jovian-judgement --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1 --build-arg VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/karmic-kraken --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1 --build-arg VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
     assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
     assert_log_not_contains 'B12X_FROM_PYPI=1'
     assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
     assert_log_not_contains 'Dockerfile\.mxfp4'
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset\)\.\.\.'
-    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/jovian-judgement\.'
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/karmic-kraken\.'
     pass "--exp-b12x --rebuild-vllm uses the B12X source-build profile"
 }
 
 test_exp_b12x_allows_vllm_prs() {
     setup_fixture
     run_build --exp-b12x --apply-vllm-pr 12345 || fail "--exp-b12x with vLLM PR run failed"
-    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=dev/jovian-judgement --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 --build-arg CACHEBUST_VLLM=[0-9]+ --build-arg VLLM_PRS=12345'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=dev/karmic-kraken --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 --build-arg CACHEBUST_VLLM=[0-9]+ --build-arg VLLM_PRS=12345'
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset with requested vLLM PRs\)\.\.\.'
     assert_output_contains 'Applying vLLM PRs: 12345'
     pass "--exp-b12x accepts additional vLLM PR patches"
@@ -1387,8 +1387,8 @@ test_dockerfile_externalizes_vllm_source_patches() {
             fail "Dockerfile does not execute external patch: $patch_name"
         fi
     done
-    if [ "$patch_count" -ne 14 ]; then
-        fail "Expected 14 external vLLM patch scripts, found $patch_count"
+    if [ "$patch_count" -ne 15 ]; then
+        fail "Expected 15 external vLLM patch scripts, found $patch_count"
     fi
     if ! python3 -c '
 from pathlib import Path
@@ -1419,6 +1419,20 @@ test_torch_schema_enumeration_patch() {
         fail "Torch schema enumeration regression tests failed"
     fi
     pass "Torch schema enumeration preserves defaults and patches the installed runner"
+}
+
+test_instanttensor_vllm_memory_patch() {
+    if ! python3 "$PROJECT_DIR/tests/test_instanttensor_vllm_memory_patch.py"; then
+        fail "InstantTensor memory accounting regression tests failed"
+    fi
+    pass "InstantTensor uses vLLM memory accounting and preserves budget checks"
+}
+
+test_b12x_moe_tuning_memory_patch() {
+    if ! python3 "$PROJECT_DIR/tests/test_vllm_b12x_moe_tuning_memory_patch.py"; then
+        fail "B12X MoE trial-buffer lifetime regression tests failed"
+    fi
+    pass "B12X MoE releases trial buffers before KV cache profiling"
 }
 
 test_default_uses_prebuilt
@@ -1493,5 +1507,7 @@ test_dockerfile_fetches_vllm_prs_from_upstream
 test_dockerfile_externalizes_vllm_source_patches
 test_swa_block_size_patch
 test_torch_schema_enumeration_patch
+test_instanttensor_vllm_memory_patch
+test_b12x_moe_tuning_memory_patch
 
 echo "Passed $TESTS_PASSED build-and-copy tests."
