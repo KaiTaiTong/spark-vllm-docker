@@ -199,9 +199,28 @@ test_runtime_pr_is_applied_in_cli_layer_order() {
     [[ "$(sed -n '2p' "$LAYER_LOG")" == vllm-pr-12345-* ]] || fail "runtime PR was not second"
     [[ "$(sed -n '3p' "$LAYER_LOG")" == "mod-b" ]] || fail "mod-b was not third"
     [[ "$(grep -c '^curl ' "$COMMAND_LOG")" -eq 1 ]] || fail "PR diff was not fetched exactly once"
-    assert_output_contains 'Validated vLLM PR #12345 for runtime application: 1 package path\(s\), 1 test/docs path\(s\) ignored\.'
+    assert_output_contains 'Validated vLLM PR #12345 for runtime application: 1 package path\(s\), 1 non-runtime path\(s\) ignored\.'
     assert_output_contains '\[vllm-pr #12345\] Applied successfully\.'
     pass "runtime PR is fetched once and applied in CLI layer order"
+}
+
+test_runtime_pr_url_fetches_named_repository() {
+    setup_fixture
+    local pr_url="https://github.com/local-inference-lab/vllm/pull/669"
+
+    run_launch --apply-vllm-pr "${pr_url}/" \
+        || fail "runtime PR URL launch failed"
+
+    grep -q '^new_value = 2$' "$FAKE_CONTAINER_ROOT/site-packages/vllm/runtime_test.py" \
+        || fail "runtime PR URL did not patch the installed vLLM fixture"
+    [[ "$(sed -n '1p' "$LAYER_LOG")" == vllm-pr-local-inference-lab-vllm-669-* ]] \
+        || fail "runtime PR URL did not produce a repository-qualified layer"
+    grep -Fq "curl -fsSL --retry 3 --retry-delay 1 ${pr_url}.diff -o " "$COMMAND_LOG" \
+        || fail "runtime PR URL was not fetched from the named repository"
+    assert_log_not_contains 'patch-diff\.githubusercontent\.com/raw/vllm-project/vllm/pull/669\.diff'
+    assert_output_contains 'Validated vLLM PR https://github\.com/local-inference-lab/vllm/pull/669 for runtime application: 1 package path\(s\), 1 non-runtime path\(s\) ignored\.'
+    assert_output_contains '\[vllm-pr https://github\.com/local-inference-lab/vllm/pull/669\] Applied successfully\.'
+    pass "full PR URL fetches and labels the named GitHub repository"
 }
 
 test_build_only_pr_is_rejected_before_container_start() {
@@ -222,6 +241,49 @@ DIFF
     assert_output_contains 'Use build-and-copy\.sh --apply-vllm-pr 23456 instead\.'
     assert_log_not_contains '^docker run '
     pass "native/build PR is rejected before containers start"
+}
+
+test_pr_52017_source_tree_metadata_is_ignored() {
+    setup_fixture
+    cat > "$FAKE_PR_DIFF" <<'DIFF'
+diff --git a/.buildkite/test_areas/kernels.yaml b/.buildkite/test_areas/kernels.yaml
+--- a/.buildkite/test_areas/kernels.yaml
++++ b/.buildkite/test_areas/kernels.yaml
+@@ -1 +1 @@
+-b12x==1.2.6
++b12x==1.3.0
+diff --git a/docs/design/attention_backends.md b/docs/design/attention_backends.md
+--- a/docs/design/attention_backends.md
++++ b/docs/design/attention_backends.md
+@@ -1 +1 @@
+-old docs
++new docs
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -1 +1 @@
+-"b12x": ["b12x==1.2.6"]
++"b12x": ["b12x==1.3.0"]
+diff --git a/tests/v1/attention/test_b12x.py b/tests/v1/attention/test_b12x.py
+--- a/tests/v1/attention/test_b12x.py
++++ b/tests/v1/attention/test_b12x.py
+@@ -1 +1 @@
+-old test
++new test
+diff --git a/vllm/runtime_test.py b/vllm/runtime_test.py
+--- a/vllm/runtime_test.py
++++ b/vllm/runtime_test.py
+@@ -1 +1 @@
+-old_value = 1
++new_value = 2
+DIFF
+
+    run_launch --apply-vllm-pr 52017 || fail "PR #52017-shaped runtime launch failed"
+    grep -q '^new_value = 2$' "$FAKE_CONTAINER_ROOT/site-packages/vllm/runtime_test.py" \
+        || fail "PR #52017-shaped fixture did not patch installed vLLM"
+    assert_output_contains 'Validated vLLM PR #52017 for runtime application: 1 package path\(s\), 4 non-runtime path\(s\) ignored\.'
+    assert_output_contains '\[vllm-pr #52017\] Applied successfully\.'
+    pass "PR #52017 CI, docs, tests, and setup metadata paths are ignored"
 }
 
 test_repeated_pr_is_downloaded_once_and_idempotent() {
@@ -248,20 +310,33 @@ test_existing_cluster_refuses_unverifiable_runtime_pr() {
     pass "existing cluster refuses an unapplied runtime PR request"
 }
 
-test_invalid_pr_number_is_rejected() {
+test_invalid_pr_reference_is_rejected() {
     setup_fixture
     if run_launch --apply-vllm-pr '123;touch-bad'; then
-        fail "invalid PR number unexpectedly succeeded"
+        fail "invalid PR reference unexpectedly succeeded"
     fi
-    assert_output_contains 'requires a positive integer PR number'
+    assert_output_contains 'requires a positive integer PR number or full https://github\.com/OWNER/REPO/pull/NUMBER URL'
     assert_log_not_contains '^curl '
-    pass "invalid PR number is rejected before launch"
+    pass "invalid PR reference is rejected before launch"
+}
+
+test_non_github_pr_url_is_rejected() {
+    setup_fixture
+    if run_launch --apply-vllm-pr 'https://example.com/local-inference-lab/vllm/pull/669'; then
+        fail "non-GitHub PR URL unexpectedly succeeded"
+    fi
+    assert_output_contains 'requires a positive integer PR number or full https://github\.com/OWNER/REPO/pull/NUMBER URL'
+    assert_log_not_contains '^curl '
+    pass "non-GitHub PR URL is rejected before launch"
 }
 
 test_runtime_pr_is_applied_in_cli_layer_order
+test_runtime_pr_url_fetches_named_repository
 test_build_only_pr_is_rejected_before_container_start
+test_pr_52017_source_tree_metadata_is_ignored
 test_repeated_pr_is_downloaded_once_and_idempotent
 test_existing_cluster_refuses_unverifiable_runtime_pr
-test_invalid_pr_number_is_rejected
+test_invalid_pr_reference_is_rejected
+test_non_github_pr_url_is_rejected
 
 echo "All $TESTS_PASSED launch-cluster runtime vLLM PR tests passed."

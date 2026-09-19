@@ -27,17 +27,23 @@ VLLM_REPO="$DEFAULT_VLLM_REPO"
 VLLM_REPO_SET=false
 VLLM_REF="main"
 VLLM_REF_SET=false
+VLLM_SOURCE_DIR=""
+VLLM_SOURCE_DIR_SET=false
+VLLM_SOURCE_COMMIT=""
+VLLM_SOURCE_STAGING_DIR=""
+VLLM_SOURCE_CONTEXT=""
 EXP_B12X=false
 EXP_B12X_VLLM_REPO="https://github.com/local-inference-lab/vllm"
-EXP_B12X_VLLM_REF="dev/infernal-invocation"
-EXP_B12X_PACKAGE_REPO="https://github.com/lukealonso/b12x.git"
-EXP_B12X_PACKAGE_REF="master"
+EXP_B12X_VLLM_REF="dev/karmic-kraken"
+B12X_PACKAGE_REPO="https://github.com/lukealonso/b12x.git"
+B12X_PACKAGE_REF="master"
 EXP_B12X_TORCH_VERSION="2.13.0"
 EXP_B12X_TORCHVISION_VERSION="0.28.0"
 EXP_B12X_TORCHAUDIO_VERSION="2.11.0"
 B12X_REPO=""
 B12X_REF=""
 B12X_CACHEBUST=""
+B12X_FROM_PYPI=0
 FLASHINFER_REF="main"
 FLASHINFER_REF_SET=false
 TMP_IMAGE=""
@@ -89,6 +95,9 @@ cleanup() {
     if [ -n "$VLLM_STAGING_DIR" ] && [ -d "$VLLM_STAGING_DIR" ]; then
         rm -rf "$VLLM_STAGING_DIR"
     fi
+    if [ -n "$VLLM_SOURCE_STAGING_DIR" ] && [ -d "$VLLM_SOURCE_STAGING_DIR" ]; then
+        rm -rf "$VLLM_SOURCE_STAGING_DIR"
+    fi
     rm -f ./build-metadata.yaml
 }
 
@@ -110,6 +119,7 @@ generate_build_metadata() {
     local b12x_repo="${13}"
     local b12x_ref="${14}"
     local cutlass_dsl_version="${15}"
+    local b12x_from_pypi="${16:-0}"
 
     local base_image
     base_image=$(grep -m1 '^FROM .* AS runner' "$dockerfile" | awk '{print $2}')
@@ -131,6 +141,7 @@ build_args:
   cutlass_dsl_version: "${cutlass_dsl_version}"
   b12x_repo: "${b12x_repo}"
   b12x_ref: "${b12x_ref}"
+  b12x_from_pypi: ${b12x_from_pypi}
   transformers_5: ${transformers_5}
   exp_mxfp4: ${exp_mxfp4}
   vllm_prs: "${vllm_prs}"
@@ -159,6 +170,80 @@ gpu_arch_to_nccl_gencode() {
     arch="${arch%[a-z]}"
     local sm="${arch//./}"
     echo "-gencode=arch=compute_${sm},code=sm_${sm}"
+}
+
+prepare_local_vllm_source() {
+    local requested_dir="$1"
+    local source_dir
+    local source_root
+    local source_status
+    local requested_ref
+    local resolved_commit
+
+    if [ ! -d "$requested_dir" ]; then
+        echo "Error: --vllm-source-dir is not a directory: $requested_dir" >&2
+        return 1
+    fi
+
+    source_dir=$(cd "$requested_dir" && pwd -P)
+    if ! git -C "$source_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Error: --vllm-source-dir must point to a Git working tree." >&2
+        return 1
+    fi
+
+    source_root=$(git -C "$source_dir" rev-parse --show-toplevel)
+    source_root=$(cd "$source_root" && pwd -P)
+    if [ "$source_dir" != "$source_root" ]; then
+        echo "Error: --vllm-source-dir must point to the root of the Git working tree." >&2
+        return 1
+    fi
+
+    source_status=$(git -C "$source_dir" status --porcelain --untracked-files=all)
+    if [ -n "$source_status" ]; then
+        echo "Error: --vllm-source-dir must be clean; commit or stash local changes first." >&2
+        return 1
+    fi
+
+    if [ -f "$source_dir/.gitmodules" ] && \
+       git -C "$source_dir" config --file .gitmodules --get-regexp 'submodule\..*\.path' >/dev/null 2>&1; then
+        echo "Error: --vllm-source-dir does not yet support repositories with Git submodules." >&2
+        return 1
+    fi
+
+    if [ "$VLLM_REF_SET" = true ]; then
+        requested_ref="$VLLM_REF"
+        if resolved_commit=$(git -C "$source_dir" rev-parse --verify "${requested_ref}^{commit}" 2>/dev/null); then
+            :
+        elif resolved_commit=$(git -C "$source_dir" rev-parse --verify "refs/remotes/origin/${requested_ref}^{commit}" 2>/dev/null); then
+            :
+        else
+            echo "Error: --vllm-ref '$requested_ref' is not available in the local vLLM checkout." >&2
+            echo "       Fetch or create the ref on the host before running the build." >&2
+            return 1
+        fi
+    else
+        resolved_commit=$(git -C "$source_dir" rev-parse --verify 'HEAD^{commit}')
+        VLLM_REF="$resolved_commit"
+    fi
+
+    VLLM_SOURCE_STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spark-vllm-source.XXXXXX")
+    if ! git clone --quiet --no-local --no-checkout "$source_dir" "$VLLM_SOURCE_STAGING_DIR/vllm"; then
+        echo "Error: Could not stage the local vLLM checkout." >&2
+        return 1
+    fi
+    if ! git -C "$VLLM_SOURCE_STAGING_DIR/vllm" fetch --quiet "$source_dir" "$resolved_commit"; then
+        echo "Error: Could not copy local vLLM commit $resolved_commit into the staging checkout." >&2
+        return 1
+    fi
+    if ! git -C "$VLLM_SOURCE_STAGING_DIR/vllm" checkout --quiet --detach "$resolved_commit"; then
+        echo "Error: Could not check out local vLLM commit $resolved_commit in the staging copy." >&2
+        return 1
+    fi
+
+    VLLM_SOURCE_COMMIT="$resolved_commit"
+    VLLM_SOURCE_CONTEXT="$VLLM_SOURCE_STAGING_DIR/vllm"
+    VLLM_REPO="local-source"
+    echo "Using clean local vLLM source at commit $VLLM_SOURCE_COMMIT."
 }
 
 get_remote_image_id() {
@@ -525,7 +610,8 @@ usage() {
     echo "  --force-vllm-download         : Force download of vLLM wheels (skip cached wheel checks)"
     echo "  --force-download              : Force download of all prebuilt wheels (skip cached wheel checks)"
     echo "  --vllm-repo <url>             : vLLM Git repository (default: '${DEFAULT_VLLM_REPO}'); custom repositories bypass the shared checkout cache"
-    echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main')"
+    echo "  --vllm-source-dir <path>      : Build vLLM from a clean local Git checkout; incompatible with --vllm-repo"
+    echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main'; local source defaults to HEAD)"
     echo "  --torch-version <version>     : PyTorch version for build and runner images (default: '${DEFAULT_TORCH_VERSION}')"
     echo "  --torchvision-version <ver>   : Optional torchvision version (default: '${TORCHVISION_VERSION}')"
     echo "  --torchaudio-version <ver>    : Optional torchaudio version; use 'none' to omit it (default: '${TORCHAUDIO_VERSION}')"
@@ -538,7 +624,7 @@ usage() {
     echo "  --tf5                         : Deprecated compatibility flag; tag defaults to 'vllm-node-tf5' (aliases: --pre-tf, --pre-transformers)"
     echo "  --exp-mxfp4, --experimental-mxfp4 : Build with experimental native MXFP4 support"
     echo "  --exp-b12x, --experimental-b12x   : Select B12X; pulls its prebuilt image unless a local wheel/image build is requested"
-    echo "  --apply-vllm-pr <pr-num>      : Apply a specific PR patch to vLLM source. Can be specified multiple times."
+    echo "  --apply-vllm-pr <pr-or-url>   : Apply a vLLM PR number or full GitHub PR URL to source. Can be specified multiple times."
     echo "  --apply-preset-vllm-prs       : Apply preset vLLM PRs even with --vllm-repo, --vllm-ref, or --apply-vllm-pr."
     echo "  --apply-flashinfer-pr <pr-num>: Apply a specific PR patch to FlashInfer source. Can be specified multiple times."
     echo "  --full-log                    : Enable full build logging (--progress=plain)"
@@ -549,6 +635,22 @@ usage() {
     echo "  --setup                       : Force autodiscovery and save configuration (even if .env exists)"
     echo "  -h, --help                    : Show this help message"
     exit 1
+}
+
+normalize_vllm_pr_reference() {
+    local value="$1"
+
+    if [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+
+    if [[ "$value" =~ ^https://github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*/pull/[1-9][0-9]*/?$ ]]; then
+        printf '%s\n' "${value%/}"
+        return 0
+    fi
+
+    return 1
 }
 
 # Parse all arguments
@@ -573,6 +675,16 @@ while [[ "$#" -gt 0 ]]; do
                 shift
             else
                 echo "Error: --vllm-repo requires a repository URL."
+                exit 1
+            fi
+            ;;
+        --vllm-source-dir)
+            if [ -n "$2" ] && [[ "$2" != -* ]]; then
+                VLLM_SOURCE_DIR="$2"
+                VLLM_SOURCE_DIR_SET=true
+                shift
+            else
+                echo "Error: --vllm-source-dir requires a path."
                 exit 1
             fi
             ;;
@@ -624,15 +736,20 @@ while [[ "$#" -gt 0 ]]; do
         --exp-mxfp4|--experimental-mxfp4) EXP_MXFP4=true ;;
         --exp-b12x|--experimental-b12x) EXP_B12X=true ;;
         --apply-vllm-pr)
-            if [ -n "$2" ] && [[ "$2" != -* ]]; then
+            VLLM_PR_REFERENCE=""
+            if [ -n "${2:-}" ]; then
+                VLLM_PR_REFERENCE="$(normalize_vllm_pr_reference "$2")" \
+                    || VLLM_PR_REFERENCE=""
+            fi
+            if [ -n "$VLLM_PR_REFERENCE" ]; then
                if [ -n "$VLLM_PRS" ]; then
-                   VLLM_PRS="$VLLM_PRS $2"
+                   VLLM_PRS="$VLLM_PRS $VLLM_PR_REFERENCE"
                else
-                   VLLM_PRS="$2"
+                   VLLM_PRS="$VLLM_PR_REFERENCE"
                fi
                shift
             else
-               echo "Error: --apply-vllm-pr requires a PR number."
+               echo "Error: --apply-vllm-pr requires a positive integer PR number or full https://github.com/OWNER/REPO/pull/NUMBER URL."
                exit 1
             fi
             ;;
@@ -676,6 +793,7 @@ if [ "$EXP_B12X" = true ]; then
     if [ "$EXP_MXFP4" = true ]; then echo "Error: --exp-b12x is incompatible with --exp-mxfp4"; exit 1; fi
     if [ "$USE_WHEELS" = true ]; then echo "Error: --exp-b12x is incompatible with --use-wheels because B12X vLLM wheels are not published"; exit 1; fi
     if [ "$VLLM_REPO_SET" = true ]; then echo "Error: --exp-b12x is incompatible with --vllm-repo"; exit 1; fi
+    if [ "$VLLM_SOURCE_DIR_SET" = true ]; then echo "Error: --exp-b12x is incompatible with --vllm-source-dir"; exit 1; fi
     if [ "$VLLM_REF_SET" = true ]; then echo "Error: --exp-b12x is incompatible with --vllm-ref"; exit 1; fi
     if [ "$TORCH_VERSION_SET" = true ]; then echo "Error: --exp-b12x is incompatible with --torch-version"; exit 1; fi
     if [ "$TORCHVISION_VERSION_SET" = true ]; then echo "Error: --exp-b12x is incompatible with --torchvision-version"; exit 1; fi
@@ -689,6 +807,30 @@ if [ "$EXP_B12X" = true ]; then
     TORCHVISION_VERSION="$EXP_B12X_TORCHVISION_VERSION"
     TORCHAUDIO_VERSION="$EXP_B12X_TORCHAUDIO_VERSION"
     PREBUILT_RUNNER_IMAGE="$PREBUILT_B12X_RUNNER_IMAGE"
+fi
+
+if [ "$VLLM_SOURCE_DIR_SET" = true ]; then
+    if [ "$VLLM_REPO_SET" = true ]; then
+        echo "Error: --vllm-source-dir is incompatible with --vllm-repo." >&2
+        exit 1
+    fi
+    if [ "$EXP_MXFP4" = true ]; then
+        echo "Error: --vllm-source-dir is incompatible with --exp-mxfp4." >&2
+        exit 1
+    fi
+    if [ "$USE_WHEELS" = true ]; then
+        echo "Error: --vllm-source-dir is incompatible with --use-wheels because local source must be compiled." >&2
+        exit 1
+    fi
+    if [ "$FORCE_VLLM_DOWNLOAD" = true ]; then
+        echo "Error: --vllm-source-dir is incompatible with --force-vllm-download." >&2
+        exit 1
+    fi
+    if [ "$NO_BUILD" = true ]; then
+        echo "Error: --vllm-source-dir is incompatible with --no-build." >&2
+        exit 1
+    fi
+    prepare_local_vllm_source "$VLLM_SOURCE_DIR" || exit 1
 fi
 
 # Apply default IMAGE_TAG based on flags if -t was not specified
@@ -708,22 +850,30 @@ if [ "$PRE_TRANSFORMERS" = true ]; then
 fi
 
 CUSTOM_VLLM_REPO=false
-if [ "$VLLM_REPO" != "$DEFAULT_VLLM_REPO" ]; then
+if [ "$VLLM_REPO" != "$DEFAULT_VLLM_REPO" ] || [ "$VLLM_SOURCE_DIR_SET" = true ]; then
     CUSTOM_VLLM_REPO=true
 fi
 
 NORMALIZED_VLLM_REPO="${VLLM_REPO%/}"
 NORMALIZED_VLLM_REPO="${NORMALIZED_VLLM_REPO%.git}"
-if [ "$NORMALIZED_VLLM_REPO" = "$EXP_B12X_VLLM_REPO" ]; then
-    B12X_REPO="$EXP_B12X_PACKAGE_REPO"
-    B12X_REF="$EXP_B12X_PACKAGE_REF"
+NORMALIZED_DEFAULT_VLLM_REPO="${DEFAULT_VLLM_REPO%/}"
+NORMALIZED_DEFAULT_VLLM_REPO="${NORMALIZED_DEFAULT_VLLM_REPO%.git}"
+if [ "$NORMALIZED_VLLM_REPO" = "$NORMALIZED_DEFAULT_VLLM_REPO" ] || \
+   [ "$NORMALIZED_VLLM_REPO" = "$EXP_B12X_VLLM_REPO" ]; then
     B12X_CACHEBUST="$(date +%s)"
     TORCH_BASE_VERSION="${TORCH_VERSION%%+*}"
     if [ "$(printf '%s\n' "2.12.0" "$TORCH_BASE_VERSION" | sort -V | head -n1)" != "2.12.0" ]; then
-        echo "Error: ${EXP_B12X_VLLM_REPO} requires --torch-version 2.12.0 or newer for B12X (got ${TORCH_VERSION})."
+        echo "Error: ${NORMALIZED_VLLM_REPO} requires --torch-version 2.12.0 or newer for B12X (got ${TORCH_VERSION})."
         exit 1
     fi
-    echo "Building B12X from ${B12X_REPO} ref ${B12X_REF} for ${NORMALIZED_VLLM_REPO} ref ${VLLM_REF}."
+    if [ "$NORMALIZED_VLLM_REPO" = "$EXP_B12X_VLLM_REPO" ]; then
+        B12X_REPO="$B12X_PACKAGE_REPO"
+        B12X_REF="$B12X_PACKAGE_REF"
+        echo "Building B12X from ${B12X_REPO} ref ${B12X_REF} for ${NORMALIZED_VLLM_REPO} ref ${VLLM_REF}."
+    else
+        B12X_FROM_PYPI=1
+        echo "Installing latest B12X from PyPI for ${NORMALIZED_VLLM_REPO} ref ${VLLM_REF}."
+    fi
 fi
 
 # Source autodiscover.sh to load .env file
@@ -1075,6 +1225,8 @@ if [ "$NO_BUILD" = false ]; then
                 echo "Rebuilding vLLM wheels (--exp-b12x preset with requested vLLM PRs)..."
             elif [ "$EXP_B12X" = true ]; then
                 echo "Rebuilding vLLM wheels (--exp-b12x preset)..."
+            elif [ "$VLLM_SOURCE_DIR_SET" = true ]; then
+                echo "Rebuilding vLLM wheels (--vllm-source-dir specified)..."
             elif [ "$VLLM_REF_SET" = true ] && [ "$VLLM_PR_APPLICATION_REQUESTED" = true ]; then
                 echo "Rebuilding vLLM wheels (applying vLLM PRs to --vllm-ref $VLLM_REF)..."
             elif [ "$VLLM_REF_SET" = true ]; then
@@ -1121,9 +1273,18 @@ if [ "$NO_BUILD" = false ]; then
                 "--build-arg" "VLLM_REF=$VLLM_REF"
                 "--build-arg" "VLLM_REPO=$VLLM_REPO")
 
+            if [ "$VLLM_SOURCE_DIR_SET" = true ]; then
+                VLLM_CMD+=("--build-context" "vllm_source=$VLLM_SOURCE_CONTEXT")
+                VLLM_CMD+=("--build-arg" "VLLM_SOURCE_MODE=local")
+                VLLM_CMD+=("--build-arg" "VLLM_SOURCE_COMMIT=$VLLM_SOURCE_COMMIT")
+            fi
+
             if [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
                 echo "Applying preset vLLM PRs from the Dockerfile (explicitly requested)."
                 VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=1")
+            elif [ "$VLLM_SOURCE_DIR_SET" = true ]; then
+                echo "Skipping preset vLLM PRs because --vllm-source-dir was specified."
+                VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=0")
             elif [ "$CUSTOM_VLLM_REPO" = true ] || [ "$VLLM_REF_SET" = true ] || [ -n "$VLLM_PRS" ]; then
                 echo "Skipping preset vLLM PRs because --vllm-repo, --vllm-ref, or --apply-vllm-pr was specified."
                 VLLM_CMD+=("--build-arg" "VLLM_APPLY_PRESET_PRS=0")
@@ -1182,7 +1343,7 @@ if [ "$NO_BUILD" = false ]; then
         generate_build_metadata Dockerfile "$VLLM_VERSION" "$VLLM_COMMIT" "$FLASHINFER_COMMIT" \
             "$VLLM_REF" "true" "false" "$VLLM_PRS" "$VLLM_REPO" "$TORCH_VERSION" \
             "${TORCHVISION_VERSION:-resolver-selected}" "${TORCHAUDIO_VERSION:-resolver-selected}" \
-            "${B12X_REPO:-disabled}" "${B12X_REF:-disabled}" "$CUTLASS_DSL_VERSION"
+            "${B12X_REPO:-disabled}" "${B12X_REF:-disabled}" "$CUTLASS_DSL_VERSION" "$B12X_FROM_PYPI"
 
         RUNNER_CMD=("docker" "build"
             "-t" "$IMAGE_TAG"
@@ -1193,6 +1354,10 @@ if [ "$NO_BUILD" = false ]; then
         if [ -n "$B12X_REPO" ]; then
             RUNNER_CMD+=("--build-arg" "B12X_REPO=$B12X_REPO")
             RUNNER_CMD+=("--build-arg" "B12X_REF=$B12X_REF")
+        elif [ "$B12X_FROM_PYPI" = "1" ]; then
+            RUNNER_CMD+=("--build-arg" "B12X_FROM_PYPI=$B12X_FROM_PYPI")
+        fi
+        if [ -n "$B12X_CACHEBUST" ]; then
             RUNNER_CMD+=("--build-arg" "B12X_CACHEBUST=$B12X_CACHEBUST")
         fi
 
