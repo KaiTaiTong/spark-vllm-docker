@@ -8,6 +8,7 @@ on:
       - 'run-recipe.sh'
       - 'launch-cluster.sh'
       - 'recipes/**'
+      - 'mods/fix-qwen3-next-autoround/**'
       - 'tests/**'
       - '.github/workflows/test-recipes.yml'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - 'run-recipe.sh'
       - 'launch-cluster.sh'
       - 'recipes/**'
+      - 'mods/fix-qwen3-next-autoround/**'
       - 'tests/**'
       - '.github/workflows/test-recipes.yml'
   workflow_dispatch:
@@ -47,6 +49,9 @@ jobs:
         chmod +x tests/test_recipes.sh tests/test_launch_cluster_image_sync.sh
         chmod +x tests/test_launch_cluster_vllm_pr.sh
     
+    - name: Test Qwen3-Next AutoRound compatibility mod
+      run: python3 tests/test_qwen3_next_autoround_mod.py
+
     - name: Run recipe integration tests
       run: |
         ./tests/test_recipes.sh -v
