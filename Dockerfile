@@ -528,6 +528,7 @@ COPY docker/patch_vllm_*.py docker/pin_cutlass_dsl.py /tmp/vllm-patches/
 # DFlash2 pages become mostly padding. Preserve the PR's supported-primary
 # path and restore the smallest-block fallback. Remove once supported refs
 # contain an equivalent upstream fix; unexpected source layouts fail closed.
+# Supports both the original selector and #53175's per-layer KV-spec API.
 RUN python3 /tmp/vllm-patches/patch_vllm_swa_block_size.py .
 
 # TEMPORARY PATCH: vLLM PR #53306 added a preliminary CUDA-graph memory
