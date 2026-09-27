@@ -48,6 +48,12 @@ WSL, vLLM keeps CUDA's reported free memory instead of replacing it with guest
 RAM availability. Native Linux UMA accounting and proactive allocator-cache
 release keep their upstream behavior.
 
+Source builds also trim unused glibc CPU heap pages after startup garbage
+collection in API servers and workers. This complements the existing CUDA
+allocator cleanup before KV cache sizing/allocation. The CPU trim is included
+in exported vLLM wheels and runs after warmup; platforms without `malloc_trim`
+skip it.
+
 Runtime images also set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` by default. Pass
 `-e VLLM_WSL2_ENABLE_PIN_MEMORY=0` to `launch-cluster.sh` or `docker run` to opt
 out.
@@ -1760,6 +1766,11 @@ Only regular vLLM wheels are downloaded from the published wheel release.
 `--exp-b12x` is therefore incompatible with `--use-wheels`: use bare
 `--exp-b12x` for the published image or add `--rebuild-vllm` for a source build.
 
+Source builds also retain `examples/features/structured_diffusion/structured_server.py`
+at `/workspace/vllm/structured_server.py` in the container when the selected
+vLLM source includes it. The script travels with locally exported wheels;
+older source refs and downloaded wheel sets without it skip this copy.
+
 Regular `vllm-project/vllm` runner builds install the latest `b12x` release from
 PyPI, including builds using precompiled vLLM wheels. A per-build cache key and
 package-index refresh prevent stale B12X releases from being reused. The
@@ -2208,6 +2219,7 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **dspark-instanttensor/**: Filters embedded `mtp.*` DSpark draft weights before InstantTensor or safetensors I/O, preventing a second full-checkpoint load.
 - **gpu-mem-util-gb/**: Adds experimental `--gpu-memory-utilization-gb` support.
 - **kv-cache-prealloc-cleanup/**: Applies model-specific manual KV-cache startup tweaks: skip CUDA graph profiling when disabled by env and allow `--gpu-memory-utilization-gb` with `--kv-cache-memory-bytes`.
+- **[memory-profile/](mods/memory-profile/README.md)**: Records per-model startup CPU/CUDA/KV measurements for every rank, API process and host, with JSONL traces, YAML profile cards, a cluster collector, Markdown reports with startup charts, and a read-only hardware requirements/cluster capacity checker.
 - **uma-fix/**: Enables vLLM's native WSL2 pinned-memory/UVA path by default and preserves raw CUDA aggregate memory reporting instead of Linux host-memory UMA accounting. Set `VLLM_WSL2_ENABLE_PIN_MEMORY=0` to opt out.
 - **drop-caches/**: Periodically clears filesystem caches for large models running near the memory limit.
 - **diffusiongemma/**: Adds DiffusionGemma support, dynamic causal attention compatibility, and Gemma4 reasoning/content-channel fixes used by the DiffusionGemma recipes.

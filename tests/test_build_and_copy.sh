@@ -1381,8 +1381,8 @@ test_dockerfile_externalizes_vllm_source_patches() {
             fail "Dockerfile does not execute external patch: $patch_name"
         fi
     done
-    if [ "$patch_count" -ne 15 ]; then
-        fail "Expected 15 external vLLM patch scripts, found $patch_count"
+    if [ "$patch_count" -ne 16 ]; then
+        fail "Expected 16 external vLLM patch scripts, found $patch_count"
     fi
     if ! python3 -c '
 from pathlib import Path
@@ -1427,6 +1427,13 @@ test_b12x_moe_tuning_memory_patch() {
         fail "B12X MoE trial-buffer lifetime regression tests failed"
     fi
     pass "B12X MoE releases trial buffers before KV cache profiling"
+}
+
+test_startup_heap_trim_patch() {
+    if ! python3 "$PROJECT_DIR/tests/test_vllm_startup_heap_trim_patch.py"; then
+        fail "Startup CPU heap trim regression tests failed"
+    fi
+    pass "Startup CPU heap trim preserves GC and skips unsupported allocators"
 }
 
 test_b12x_cache_integrity_patch() {
@@ -1510,6 +1517,7 @@ test_swa_block_size_patch
 test_torch_schema_enumeration_patch
 test_instanttensor_vllm_memory_patch
 test_b12x_moe_tuning_memory_patch
+test_startup_heap_trim_patch
 test_b12x_cache_integrity_patch
 
 echo "Passed $TESTS_PASSED build-and-copy tests."

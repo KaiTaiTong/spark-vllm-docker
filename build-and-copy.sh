@@ -1066,7 +1066,8 @@ if [[ "$CLEANUP_MODE" == "true" ]]; then
         [ -d "$cache_dir" ] || continue
         rm -f "$cache_dir"/*.whl \
             "$cache_dir"/.*-commit \
-            "$cache_dir"/.*-arch
+            "$cache_dir"/.*-arch \
+            "$cache_dir"/.vllm-structured-server.py
         echo "Cleaned $cache_dir"
     done
     echo "Cleanup complete."
