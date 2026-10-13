@@ -48,11 +48,12 @@ WSL, vLLM keeps CUDA's reported free memory instead of replacing it with guest
 RAM availability. Native Linux UMA accounting and proactive allocator-cache
 release keep their upstream behavior.
 
-Source builds also trim unused glibc CPU heap pages after startup garbage
-collection in API servers and workers. This complements the existing CUDA
-allocator cleanup before KV cache sizing/allocation. The CPU trim is included
-in exported vLLM wheels and runs after warmup; platforms without `malloc_trim`
-skip it.
+Regular and B12X source builds also trim unused glibc CPU heap pages before
+the final KV cache sizing measurement, after profiling cleanup. On Spark's
+shared CPU/GPU memory, this prevents freed loader/profiling buffers retained
+by glibc from reducing the KV budget. API servers and workers still trim after
+startup garbage collection and warmup. Both trims are included in exported
+vLLM wheels; platforms without `malloc_trim` skip them.
 
 Runtime images also set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` by default. Pass
 `-e VLLM_WSL2_ENABLE_PIN_MEMORY=0` to `launch-cluster.sh` or `docker run` to opt
@@ -133,7 +134,7 @@ Launch the server:
     --port 8000 \
     --trust-remote-code \
     --kv-cache-dtype fp8 \
-    --gpu-memory-utilization 0.7 \
+    --gpu-memory-utilization 0.8 \
     --max-model-len 262144 \
     --max-num-seqs 8 \
     --max-num-batched-tokens 16384 \
@@ -1679,6 +1680,13 @@ Building the container manually is no longer supported due to Dockerfile complex
 
 The `build-and-copy.sh` script prepares the runner image and optionally copies it to one or more nodes. By default it pulls `eugr/spark-vllm:latest` and tags it locally. Use `--use-wheels` to build only the runner from downloaded or local precompiled wheels. Source compilation happens only when an explicit source-build flag such as `--rebuild-vllm`, `--vllm-ref`, `--apply-vllm-pr`, `--rebuild-flashinfer`, `--flashinfer-ref`, or `--apply-flashinfer-pr` is supplied.
 
+Source builds select DeepGEMM after applying vLLM patches. vLLM refs that require
+the stable-ABI `deep_gemm/_C.py` interface use the repository and commit declared
+in that ref's CMake configuration. Older refs, including the current B12X fork,
+retain the pinned DeepGEMM SM121 workaround. The build checks required source
+files before compiling and records the selected commit in `.deepgemm-commit`
+alongside the exported wheels.
+
 **Basic usage (prepare local image):**
 
 ```bash
@@ -1967,7 +1975,7 @@ Assumptions and limitations:
 - It clears the Docker image entrypoint by default so images that define an entrypoint, such as `vllm-openai`, can still start as idle cluster containers before commands are executed. Use `--keep-entrypoint` to keep the image entrypoint.
 - Solo mode uses loopback for internal vLLM, NCCL, Gloo, and TensorPipe communication and disables NCCL RDMA, even when `.env` contains cluster interfaces or a cluster IP. This also applies when a single-node configuration automatically selects solo mode. Explicit `--eth-if` and container environment settings (`-e` or `CONTAINER_*`) can override these defaults. The API listening address is still controlled by `vllm serve --host`.
 - In solo mode, `-p` / `--publish` can be used to publish ports in Docker format, for example `-p 8000:8000`. When port publishing is used, the launcher does not use host networking. Port publishing is not supported in cluster mode.
-- It sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in each container by default to reduce allocator fragmentation on DGX Spark. Override it with `-e PYTORCH_CUDA_ALLOC_CONF=<value>` when needed.
+- It leaves `PYTORCH_CUDA_ALLOC_CONF` unset by default. PyTorch defaults to `expandable_segments:False` while retaining normal memory caching. Opt in for workloads that benefit with `-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, or set `PYTORCH_CUDA_ALLOC_CONF` in the recipe's `env` section.
 - It mounts `~/.cache/huggingface`, `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.cache/b12x`, `~/.triton`, and `~/.tilelang` by default. Use `--no-cache-dirs` to skip the vLLM/FlashInfer/B12X/Triton/TileLang cache mounts. Add other mounts with repeatable Docker-style `-v` / `--volume` options, e.g. `-v "$HOME/my-data:/data"`.
 
 
@@ -2186,6 +2194,8 @@ When `--non-privileged` is specified:
 - Resource limits are applied: memory (110GB), memory+swap (120GB), pids (4096)
 
 All launch modes set Docker's open-file ulimit to `1048576`, which avoids loader failures when highly sharded models are opened in parallel by Ray workers. Override it with `VLLM_SPARK_NOFILE_LIMIT` if your host requires a different value.
+
+All launch modes also set `--ulimit memlock=-1:-1` on head and worker containers so NCCL/RDMA memory registration is not constrained by Docker's locked-memory limits. This does not increase the amount of available RAM or change container memory limits.
 
 These resource limits can be customized:
 ```bash

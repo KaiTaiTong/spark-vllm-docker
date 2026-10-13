@@ -8,7 +8,7 @@ CONTAINER_WORKSPACE_DIR="/workspace"
 CONTAINER_EXEC_SCRIPT="$CONTAINER_WORKSPACE_DIR/exec-script.sh"
 # Modify these if you want to pass additional docker args or set VLLM_SPARK_EXTRA_DOCKER_ARGS variable
 DOCKER_ARGS="-e NCCL_IGNORE_CPU_AFFINITY=1"
-DOCKER_ARGS="$DOCKER_ARGS -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+# DOCKER_ARGS="$DOCKER_ARGS -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 DOCKER_ARGS="$DOCKER_ARGS -v $HF_CACHE_DIR:/root/.cache/huggingface"
 
 # Append additional arguments from environment variable
@@ -1541,10 +1541,10 @@ start_cluster() {
     if [[ "$NON_PRIVILEGED_MODE" == "true" ]]; then
         echo "Running in non-privileged mode..."
         docker_caps_args="--cap-add=IPC_LOCK"
-        docker_resource_args="--ulimit nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT} --shm-size=${SHM_SIZE_GB}g --device=/dev/infiniband --memory ${MEM_LIMIT_GB}g --memory-swap ${MEM_SWAP_LIMIT_GB}g --pids-limit ${PIDS_LIMIT}"
+        docker_resource_args="--ulimit nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT} --ulimit memlock=-1:-1 --shm-size=${SHM_SIZE_GB}g --device=/dev/infiniband --memory ${MEM_LIMIT_GB}g --memory-swap ${MEM_SWAP_LIMIT_GB}g --pids-limit ${PIDS_LIMIT}"
     else
         docker_caps_args="--privileged"
-        docker_resource_args="--ulimit nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT} --ipc=host"
+        docker_resource_args="--ulimit nofile=${NOFILE_LIMIT}:${NOFILE_LIMIT} --ulimit memlock=-1:-1 --ipc=host"
     fi
     local keepalive_cmd=(sleep infinity)
     if [[ "$ENABLE_EARLYOOM" == "true" ]]; then
