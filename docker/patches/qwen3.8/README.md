@@ -33,6 +33,13 @@ The vLLM order is:
 11. The supplied 32,768-token Flash Next draft vocabulary.
 12. [#60646](https://github.com/vllm-project/vllm/pull/60646): CSF-compressed NVFP4 scale loading.
 13. Wheel package-data inclusion for the draft vocabulary.
+14. The local Flash Next FP4 mod from `mods/draft/flash-next-fp4`:
+    opt-in resident CSF expert scales, ModelOpt dispatch, nested scale loading,
+    weight-transfer helpers, and post-load host-heap trimming. Its vocabulary
+    path is packaged alongside the identical existing vocabulary.
+15. `17-flash-next-b12x-loader.patch`: opt-in `--load-format b12x` for Flash
+    Next and its embedded MTP draft on Spark, using FlashInfer's checkpoint
+    reader and the weight-transfer helpers supplied by patch 16.
 
 [#55601](https://github.com/vllm-project/vllm/pull/55601) is already in the
 validated upstream base. [#59244](https://github.com/vllm-project/vllm/pull/59244)
@@ -48,6 +55,144 @@ W4A4 MoE), then [#5943](https://github.com/flashinfer-ai/flashinfer/pull/5943)
 `15c5c8d21388c118558c8370299204aa4b110ced`.
 
 ## Integration and refresh
+
+Later on October 13, patch 16 was rebased on vLLM
+`624a5ddafd96df23fe2b9f6d4b8f52a08b9fe9ea` after
+[#59604](https://github.com/vllm-project/vllm/pull/59604) added IQ2/Q8 ModelOpt
+dispatch at the resident-CSF insertion point. The reported `modelopt.py`
+conflict reproduces on this base. The refreshed patch retains upstream block
+quantization dispatch before the opt-in resident-CSF NVFP4 path, preserving
+both features. No upstream PR revisions or series selection changed.
+
+The full 16-patch vLLM series replays cleanly and reproduces the prepared source
+tree. All 17 Docker source patchers pass, all 129 changed Python files compile,
+and both draft vocabularies remain packaged. The 15 series tests, 100
+build-selection checks, and 28 CPU loader tests pass; the native-reader test
+is skipped. The new regression fails with the previous patch and covers
+IQ2/Q8 linear, embedding, and expert dispatch, plus resident-CSF opt-in and
+default NVFP4 dispatch. GPU compilation and inference remain for CI.
+
+All 18 patches were refreshed on October 13, 2026 against upstream vLLM
+`12b005eefa06f97eeebfae3e14bcac5fa3b81197` and FlashInfer
+`74ca44b318a3be013649baabca698099d0862e3c`. Eight referenced PR heads changed:
+vLLM #56273, #59973, #59740, #60226, #60068, #50897, and #54614, plus
+FlashInfer #5863. All 17 referenced PRs remain open. The patch headers record
+their current revisions; existing local integration fixes are retained.
+#56273 updates the pinned PLE test for the current prefetch API and trims its
+test coverage to loader/lookup validation. The other head updates merge main;
+their conflict resolutions are incorporated without duplicating tests or hooks.
+
+The refresh resolves two new source conflicts:
+
+- [#61183](https://github.com/vllm-project/vllm/pull/61183) moved KV-cache
+  planning out of `kv_cache_utils.py`, overlapping #50897's hash helpers.
+  The helpers remain in that file without restoring the moved planning code.
+- [#61082](https://github.com/vllm-project/vllm/pull/61082) added the
+  `monokernel` setting at #54617's insertion point. Both that setting and the
+  dynamic NVFP4 MoE settings are preserved.
+
+Validation: the complete 16-patch vLLM and 2-patch FlashInfer series replay
+cleanly and reproduce the prepared source trees. All 17 subsequent vLLM source
+patchers and the FlashInfer loader patch pass; all 153 changed Python files
+compile. The 14 series tests, 28 SWA tests, 100 build-selection checks, 28 CPU
+loader tests, and nine PLE constructor cases pass. The new series regression
+reproduces the old KV-cache patch failure and checks lookahead metadata and
+the non-lookahead fallback after application. Both draft vocabularies and their
+wheel package-data rules remain intact. The native-reader test is skipped on
+CPU; image compilation and GPU inference remain for CI. These results apply
+to the recorded commits; builds following moving main can need another refresh.
+
+The host-file-gather implementation in `01-pr59958.patch` now implements the
+current PLE base class's `finalize_prefetch` method and single-argument
+`start_prefetch` signature. File gather keeps synchronous row staging and
+rejects prefetch finalization, as the device backend does. This fixes the
+abstract-class construction error before weight loading with both `safetensors`
+and `b12x`. Rebuild the regular vLLM wheel and runner to include the correction.
+The dependency-free series regression reproduces the original exception, and
+the patch includes construction checks for BF16, FP8, and NVFP4 with dummy,
+safetensors, and b12x load configurations. All nine constructor cases pass with
+CPU tensors and mocked platform services. The full series and all 17 Docker
+source patchers replay on the base below; 13 series tests and 28 CPU loader
+tests pass. Full checkpoint loading and Spark inference remain unverified.
+
+`17-flash-next-b12x-loader.patch` follows patch 16, bringing the series to 16
+vLLM patches and 2 FlashInfer patches. It adapts the loader and transfer hooks
+from `local-inference-lab/vllm` commit
+`3a947437cf1eb734299de91370c9b37fcdbcc42b` to the regular source interfaces.
+The patch contains its implementation and focused tests; FlashInfer remains
+on the regular upstream lane. Rebuild the regular vLLM wheel and runner to
+include it, using a current compatible regular FlashInfer wheel.
+
+The included tests exercise actual source definitions with CPU tensors without
+importing unrelated inference kernels. After applying the series to a source
+checkout, run them with Torch, safetensors, NumPy, and pytest installed:
+
+```bash
+python -m pytest --noconftest --import-mode=importlib \
+  <vllm-source>/tests/model_executor/model_loader/test_flash_next_b12x_loader.py
+```
+
+The native-reader case additionally requires Spark CUDA and FlashInfer, and
+skips on a CPU-only test environment. Full model loading, output parity, and
+startup memory/time comparisons still require GPU validation.
+
+Validation on `fe341a53dda00472c281a2d1f4bd34a74e7eae6e`: the complete
+16-patch vLLM series applies cleanly and reproduces the prepared source.
+All 17 subsequent Docker source patchers pass, and all 129 changed Python
+files parse. The 28 CPU loader checks, 12 series tests, and 100 build-selection
+checks pass; the native-reader test is skipped in the CPU environment.
+Lint and formatting checks pass for all 14 files in patch 17. No image build
+or live inference was performed for this addition.
+
+`16-flash-next-fp4.patch` integrates the supplied runtime mod after the October
+12 refresh, bringing the series to 15 vLLM patches and 2 FlashInfer patches.
+Its header records the original patch path and SHA-256. All 13 source changes
+are retained, including the mod's `setup.py` package-data rule, so the exported
+wheel includes them. The runtime mod is unnecessary on images built with this
+series. The original mod remains available for the older image it documents.
+The source mod directory is ignored by Git; the vendored patch is self-contained
+and does not require that directory at build time.
+
+The extended 15-patch vLLM series replays cleanly on
+`fe341a53dda00472c281a2d1f4bd34a74e7eae6e`. All 17 subsequent source patchers
+pass, and all 122 changed Python files parse. Validation also covers both
+vocabulary paths and their wheel package-data rules, 12 series tests (including
+default CSF decoding versus resident-scale pass-through), 14 heap-cleanup tests,
+and 100 build-selection checks. The original mod's runtime changes remain
+present after the Docker patchers. GPU build and inference checks remain for CI.
+
+All 16 patches were refreshed on October 12, 2026 against upstream vLLM
+`fe341a53dda00472c281a2d1f4bd34a74e7eae6e` and FlashInfer
+`b77de25d433ff5082247b8e306c3aa54857e3ed7`. All 17 referenced PRs remain open;
+two revisions changed since the previous refresh:
+
+- #56273 at `5f70b31388895bfd8ced626b9ae89dc00b61f410` validates NVFP4 global
+  scales like FP8, supports loaders that copy state without calling
+  `load_weights`, and rejects unsupported PLE quantization formats. File-gather
+  binding and the shared byte-scale decoder are retained.
+- #50897 at `ff08350f20b036b36b3a033001d6f9b4b5448e75` adds the
+  `disable_lookahead_block_hashes` opt-out and consolidates EAGLE block dropping
+  through `drop_eagle_group_ids`. The Mooncake partial-tail and finished-save
+  integrations are retained alongside the updated upstream tests.
+
+The refresh also resolves conflicts introduced by
+[#56322](https://github.com/vllm-project/vllm/pull/56322)'s Qwen sequence
+parallelism and [#60692](https://github.com/vllm-project/vllm/pull/60692)'s draft
+decode-metadata refactor. Pinned and file-gather PLE lookups retain full token
+rows until sharding; file-gather rows already contain all vocabulary owners and
+must not be summed again by reduce-scatter. The sparse-draft MTP imports are
+preserved, and confidence stopping disables fused decoding through the new
+`supports_decode_metadata_update` API.
+
+Validation: both exported series apply without conflicts and reproduce the
+prepared source trees. All 17 subsequent vLLM source patchers and the FlashInfer
+loader patch pass; all 138 changed Python files parse. The 11 series tests,
+28 SWA tests, and 100 build-selection checks pass. New CPU regressions cover PLE
+storage/sharding combinations and confidence stopping with the new metadata
+API; Mooncake save-limit and block-reference checks also pass. The vocabulary
+and wheel package-data rule remain intact. GPU compilation and inference remain
+for CI. These results apply to the recorded commits; later main revisions may
+require another refresh.
 
 On October 11, #59973 and #50897 were rebased after two upstream changes
 landed between validation and the nightly build. Their PR revisions are
@@ -161,6 +306,34 @@ regular FlashInfer and vLLM wheels when introducing or updating this series.
 
 ## Runtime options
 
+`--load-format b12x` is opt-in for Qwen3.8 Flash Next NVFP4 and its embedded
+MTP draft (the upstream `Qwen4Exp` classes). This backport supports Spark with
+TP=1 or TP=2, without EP, DP, pipeline/context parallelism, EPLB, sleep mode,
+or standalone weight reload. Other model architectures are rejected.
+`--model-loader-extra-config '{"io_threads":8}'` sets the reader's I/O threads
+(1–16, default 8). `read_mode` accepts `auto` or `bounce`, both selecting the
+Spark transport; this backport does not expose the fork's shared-GDS path.
+Multithread checkpoint routing and non-default safetensors read strategies
+are rejected.
+
+Ordinary weights use direct reads into CUDA parameter slices. PLE weights
+retain the regular lane's mmap transport so device, pinned-host, and
+`engram_config.host_file_gather` tables preserve their existing behavior.
+Use the regular PLE configuration; the fork's `VLLM_PLE_TABLE_MEMORY` selector
+is not introduced. B12X I/O counters exclude those mmap-loaded PLE bytes.
+Both decoded CSF scales and opt-in resident CSF scales are supported; retained
+quantized draft-head weights are materialized before their values are used.
+The load format does not select inference kernels or change other load formats.
+
+Flash Next FP4 resident compressed expert scales require `VLLM_CSF_RESIDENT=1`
+and a CSF checkpoint with per-layer ModelOpt `weight_scale_encoding: csf`
+metadata, using `--quantization modelopt_mixed`. This path requires SM12x B12X,
+bias-free BF16 SwiGLU experts, and TP without EP, DP, EPLB, pipeline parallelism,
+or ubatching. With the option unset, the default loader continues decoding CSF
+scales through #60646. The additional post-load heap trim defaults to enabled;
+set `VLLM_TRIM_HOST_HEAP_AFTER_LOAD=0` to disable that trim. GPU execution of the
+resident-scale path remains unvalidated.
+
 The series supplies capabilities; recipe choices remain explicit. In particular,
 `--prefix-match-unit 48`, adaptive draft depth, and dynamic kernel backends are
 not enabled globally.
@@ -175,3 +348,7 @@ python3 -c 'from importlib.resources import files; print(files("vllm") / "model_
 
 The JSON is included in the exported vLLM wheel, so the runner does not need the
 builder's source checkout.
+
+The same vocabulary is also packaged at
+`vllm/v1/worker/gpu/spec_decode/draft_vocab_lists/qwen38_flash_next_32k.json`
+to preserve the Flash Next FP4 mod's documented `draft_token_map` path.

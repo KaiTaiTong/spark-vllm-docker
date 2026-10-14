@@ -1,7 +1,7 @@
 From: Stefano Castagnetta <scastagnetta@nvidia.com>
 Subject: [PATCH] Add 32k Qwen3.8-Flash-Next draft vocabulary list
 
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 diff --git a/vllm/model_executor/layers/draft_vocab_lists/qwen38_flash_next_32k.json b/vllm/model_executor/layers/draft_vocab_lists/qwen38_flash_next_32k.json
 new file mode 100644

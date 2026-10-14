@@ -2,10 +2,10 @@ From: Stefano Castagnetta <scastagnetta@nvidia.com>
 Subject: [PATCH] [PR #59740 + #60226] Context Aware Sparse LM Head, including quantized lm_heads
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/59740
-Upstream-Commit: 3ed5c097f701b617f03e3b5d1e560a4044f0eb4a
+Upstream-Commit: 6160ed7294754516079e7765f5f7bacf9c1432b6
 Upstream-PR: https://github.com/vllm-project/vllm/pull/60226
-Upstream-Commit: 9c42d41da0aedae76b5d5a878718d5945cd2a9f0
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Upstream-Commit: 92ed4c1160e11cd712934eb2525b6df3b8cebb83
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 Combined sparse draft vocabulary and quantized-head support. Preserve both
 unsupported-feature entries when combined with #59973.
@@ -677,7 +677,7 @@ index 0000000000000000000000000000000000000000..0e332a52d3ba5b7faccb01708676b77e
 +    assert reduced > 1.0
 +    assert reduced >= 0.9 * stock
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index 4b63b36bd5f5116e25882ff9e5447002f110f2ef..babf73d087e51f45aabd91a542c4eb93201d6c83 100644
+index cb9573fd6b5f8f58d6107f2e5654fed30c6063e4..e0b8d4c6ebdb6a52538a759bcfef4ca2b8acf858 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -472,6 +472,34 @@ class SpeculativeConfig:
@@ -715,7 +715,7 @@ index 4b63b36bd5f5116e25882ff9e5447002f110f2ef..babf73d087e51f45aabd91a542c4eb93
      # Ngram proposer configuration
      prompt_lookup_max: int | None = Field(default=None, ge=1)
      """Maximum size of ngram token window when using Ngram proposer, required
-@@ -1876,6 +1904,20 @@ class SpeculativeConfig:
+@@ -1883,6 +1911,20 @@ class SpeculativeConfig:
                  "omit it."
              )
  
@@ -737,10 +737,10 @@ index 4b63b36bd5f5116e25882ff9e5447002f110f2ef..babf73d087e51f45aabd91a542c4eb93
              self.verify_equal_vocab_size_if_draft_model()
          return self
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index b6ee590b0397f2419310a724910c1ed4ddffa71d..3f371df9c4c21dc02c9690aa801d441e8a0dcf11 100644
+index 86696928649505cc4ddbceefc7889eec5e0c064c..df9c0c1a789147c1aa55c4cd373c38081846b4b7 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -3006,6 +3006,8 @@ class VllmConfig:
+@@ -2981,6 +2981,8 @@ class VllmConfig:
                  unsupported.append("adaptive draft verification")
              if self.speculative_config.draft_lm_head_quantization is not None:
                  unsupported.append("draft lm_head quantization")
@@ -1670,7 +1670,7 @@ index 13c868e59b385d829979a524676fbf7f99e533d2..4fce5ce6c3b8b49a66b24a3a4f9e1aeb
      def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
          stacked = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
 diff --git a/vllm/model_executor/models/interfaces.py b/vllm/model_executor/models/interfaces.py
-index 272b78da50a45abfadedfb6f2b512fae3b36a81c..780c57c6616d5c1c2131356949127d982ca1089f 100644
+index a780cbe23cf6b6afc00a30ca36d74acc3ca68b4c..a54ea0aa4d6aeef8e81b0f488f513102b2ee9aac 100644
 --- a/vllm/model_executor/models/interfaces.py
 +++ b/vllm/model_executor/models/interfaces.py
 @@ -50,6 +50,7 @@ if TYPE_CHECKING:
@@ -1988,18 +1988,18 @@ index b6513e802d7383a47b4cc93bbbc0ea5d205b376a..392e905e044b8258b51d1763275b960f
      def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
          def remap_weight_names():
 diff --git a/vllm/models/qwen4_exp/nvidia/mtp.py b/vllm/models/qwen4_exp/nvidia/mtp.py
-index 61290617ae750249d6e781153a140f44d83de0ea..cbf8cb8f3604372d973a8bc04856e06ed8e7bd9e 100644
+index 32e95faa0dc882150a3b7dd9809641651fb2ff4e..c93c3eb64c10783a2fbfe19ff6fc86d1aef066f9 100644
 --- a/vllm/models/qwen4_exp/nvidia/mtp.py
 +++ b/vllm/models/qwen4_exp/nvidia/mtp.py
-@@ -22,6 +22,7 @@ from transformers import Qwen4ExpTextConfig
- 
+@@ -24,6 +24,7 @@ from vllm import envs
  from vllm.config import VllmConfig, replace, set_current_vllm_config
  from vllm.distributed import get_pp_group
+ from vllm.forward_context import get_forward_context, is_forward_context_available
 +from vllm.model_executor.layers.draft_vocab import DraftVocab
  from vllm.model_executor.layers.fused_moe.utils import (
      is_model_fused_shared_expert_compatible,
  )
-@@ -395,6 +396,7 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
+@@ -435,6 +436,7 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
              self.lm_head = PPMissingLayer()
  
          self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -2007,7 +2007,7 @@ index 61290617ae750249d6e781153a140f44d83de0ea..cbf8cb8f3604372d973a8bc04856e06e
          self.make_empty_intermediate_tensors = (
              self.model.make_empty_intermediate_tensors
          )
-@@ -425,7 +427,7 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
+@@ -465,7 +467,7 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
      def compute_logits(
          self, hidden_states: torch.Tensor, spec_step_idx: int = 0
      ) -> torch.Tensor | None:

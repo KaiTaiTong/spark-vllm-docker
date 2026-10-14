@@ -2,8 +2,8 @@ From: stecasta
 Subject: [PATCH] [MRV2][Spec Decode] Quantized draft lm_head for drafters that share the target head
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/59973
-Upstream-Commit: 0c2ed06ac005871507645ecc63e05a28058e15bf
-Integration-Base: 2339bd39d661965b821bfbe652db8f536e0b3dcd
+Upstream-Commit: ff04de5eb49bd6d2c4fab8812fed92528a29beb3
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 Preserve #60937's native MRV2 weight reload and cache resets. Keep the
 quantized draft-head refresh in reset_lora_state for reloads and transfers.
@@ -361,10 +361,10 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +    for name, tensor in before.items():
 +        assert torch.equal(after[name], tensor), name
 diff --git a/tests/v1/worker/test_gpu_worker_weight_transfer.py b/tests/v1/worker/test_gpu_worker_weight_transfer.py
-index f1965cb1fae226bb55911f0c595b6c5f58b1d614..ff5acfb6d19e82ad96593c6a82dd1ec09c2ee55f 100644
+index ec63c08c70c4b96c9f2b8aef9bbadbc5cc312614..61d6f38e08525a1d3dd30516a8efc951903db0cf 100644
 --- a/tests/v1/worker/test_gpu_worker_weight_transfer.py
 +++ b/tests/v1/worker/test_gpu_worker_weight_transfer.py
-@@ -61,6 +61,9 @@ class _RecordingModelRunner:
+@@ -65,6 +65,9 @@ class _RecordingModelRunner:
      def reset_lora_state(self) -> None:
          self.reset_lora_calls += 1
  
@@ -375,7 +375,7 @@ index f1965cb1fae226bb55911f0c595b6c5f58b1d614..ff5acfb6d19e82ad96593c6a82dd1ec0
  def _make_worker(engine: _RecordingEngine | None) -> Worker:
      worker = object.__new__(Worker)
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index 4c61ead82dabdddef79eea4d77558fd260cd7b8d..4b63b36bd5f5116e25882ff9e5447002f110f2ef 100644
+index b916d7da2bed09362fbfd3593efb4d8f97abee3a..cb9573fd6b5f8f58d6107f2e5654fed30c6063e4 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -454,6 +454,12 @@ class SpeculativeConfig:
@@ -391,7 +391,7 @@ index 4c61ead82dabdddef79eea4d77558fd260cd7b8d..4b63b36bd5f5116e25882ff9e5447002
      use_local_argmax_reduction: bool = False
      """Use vocab-parallel local argmax instead of all-gathering full logits
      for draft token generation. Reduces communication from O(vocab_size) to
-@@ -1816,6 +1822,20 @@ class SpeculativeConfig:
+@@ -1823,6 +1829,20 @@ class SpeculativeConfig:
                  "n_predict parameter."
              )
  
@@ -413,10 +413,10 @@ index 4c61ead82dabdddef79eea4d77558fd260cd7b8d..4b63b36bd5f5116e25882ff9e5447002
              raise ValueError(
                  "Expected num_speculative_tokens to be greater "
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index b4298cd145b8e02892d38f1bb2a5687544d68f9b..b6ee590b0397f2419310a724910c1ed4ddffa71d 100644
+index d6e834861a19a5bee291ac6098f327c66c2a21b2..86696928649505cc4ddbceefc7889eec5e0c064c 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -3004,6 +3004,8 @@ class VllmConfig:
+@@ -2979,6 +2979,8 @@ class VllmConfig:
                  unsupported.append("dspark speculative decoding")
              if self.speculative_config.enable_adaptive_verification:
                  unsupported.append("adaptive draft verification")
@@ -658,10 +658,10 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +    if refresh:
 +        refresh_quantized_lm_heads(model)
 diff --git a/vllm/model_executor/layers/vocab_parallel_embedding.py b/vllm/model_executor/layers/vocab_parallel_embedding.py
-index be20c412438c9fc30bd4a008c7054e682494931f..ae5a8c3840048e37800715b9ab3547311cc4f0c1 100644
+index 92e65c839dbf40fa3b983e57e2364eb7cbf52654..574aed3090fe422f376075c60bf3c023897f38d9 100644
 --- a/vllm/model_executor/layers/vocab_parallel_embedding.py
 +++ b/vllm/model_executor/layers/vocab_parallel_embedding.py
-@@ -606,6 +606,7 @@ class ParallelLMHead(VocabParallelEmbedding):
+@@ -607,6 +607,7 @@ class ParallelLMHead(VocabParallelEmbedding):
          prefix: str = "",
          *,
          disable_tp: bool = False,
@@ -669,7 +669,7 @@ index be20c412438c9fc30bd4a008c7054e682494931f..ae5a8c3840048e37800715b9ab354731
      ):
          self.has_bias = bias
          super().__init__(
-@@ -617,6 +618,7 @@ class ParallelLMHead(VocabParallelEmbedding):
+@@ -618,6 +619,7 @@ class ParallelLMHead(VocabParallelEmbedding):
              quant_config,
              prefix,
              disable_tp=disable_tp,
@@ -678,7 +678,7 @@ index be20c412438c9fc30bd4a008c7054e682494931f..ae5a8c3840048e37800715b9ab354731
          self.quant_config = quant_config
          if bias:
 diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
-index 20fa4c17bb07acc76cbae494843ed0c4b4758e11..dc7f0de80b62256d3f60dc2a0f1248f3d920d2dd 100644
+index 57cef586f81fd48337bf43a437c392127ecc1a6b..8fc681d19cd9ce99826e04ad1b562120d3f46c08 100644
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
 @@ -33,7 +33,7 @@ import vllm.envs as envs
@@ -760,7 +760,7 @@ index 65289bb18e6af0ad4b8ef84968b2ed03fd6a70f8..63e999b75fbfa7278fece3bf1d80a595
      # MTP shares topk_indices_buffer with the target model. We update
      # every module in the draft that holds a buffer reference so that
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 152def62221cefd2b2b2ba68b5b6cb0469e811bf..1a1cc1e3a55472b0cf729993c6ff450c74251101 100644
+index 04feb5da025a6072f100eaba485baefe74247aaa..9747a39dc6711c1c606889836b0431eb0dd21cbe 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -62,6 +62,10 @@ from vllm.distributed.weight_transfer import (
@@ -774,7 +774,7 @@ index 152def62221cefd2b2b2ba68b5b6cb0469e811bf..1a1cc1e3a55472b0cf729993c6ff450c
  from vllm.model_executor.model_loader import get_model_loader
  from vllm.model_executor.model_loader.weight_checksum import (
      compute_tensor_digests,
-@@ -1515,12 +1519,19 @@ class Worker(WorkerBase):
+@@ -1537,12 +1541,19 @@ class Worker(WorkerBase):
                  "active. Call finish_weight_update first."
              )
  
@@ -794,7 +794,7 @@ index 152def62221cefd2b2b2ba68b5b6cb0469e811bf..1a1cc1e3a55472b0cf729993c6ff450c
              raise
          self._weight_update_active = True
          self._weight_update_is_draft = is_draft
-@@ -1560,6 +1571,10 @@ class Worker(WorkerBase):
+@@ -1582,6 +1593,10 @@ class Worker(WorkerBase):
              except BaseException:
                  self._weight_update_active = False
                  self.weight_transfer_engine.reset_weight_update_target()
@@ -805,7 +805,7 @@ index 152def62221cefd2b2b2ba68b5b6cb0469e811bf..1a1cc1e3a55472b0cf729993c6ff450c
                  raise
  
      def finish_weight_update(self) -> None:
-@@ -1576,6 +1591,10 @@ class Worker(WorkerBase):
+@@ -1598,6 +1613,10 @@ class Worker(WorkerBase):
              self.weight_transfer_engine.finish_weight_update()
              self.weight_transfer_engine.reset_weight_update_target()
              self._weight_update_active = False

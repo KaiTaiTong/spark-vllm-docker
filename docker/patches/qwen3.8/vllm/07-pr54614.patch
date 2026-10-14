@@ -2,18 +2,18 @@ From: Stefano Castagnetta <scastagnetta@nvidia.com>
 Subject: [PATCH] [PR #54614] [Kernel] Dynamic NVFP4 W4A4/W4A16 selection with shared weights
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/54614
-Upstream-Commit: 7fb05c982f69233c0175fea2e54bda441e96476b
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Upstream-Commit: 5feaedcf9b4fa18d9e0b817153d681bededdd4d9
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 Preserve the quantized-input shape and autotune cache-key tests from main.
 Keep round_up=True and full-model autotuning after removal of the obsolete
 BF16-only warmup path.
 
 diff --git a/.buildkite/test_areas/kernels.yaml b/.buildkite/test_areas/kernels.yaml
-index aa0971b4c55ed08435cf21689eb332865d9fa075..fb792c4716882a87b49257adc3d7c17fa909ac09 100644
+index 472c19e74ae19b4acaf6c9618b0c9476a74f8192..5a3ca8cf7052e068e77c7c0098d54630617c81d4 100644
 --- a/.buildkite/test_areas/kernels.yaml
 +++ b/.buildkite/test_areas/kernels.yaml
-@@ -717,11 +717,16 @@ steps:
+@@ -718,11 +718,16 @@ steps:
    - vllm/model_executor/layers/quantization/mxfp4.py
    - vllm/model_executor/layers/quantization/utils/b12x_moe.py
    - vllm/model_executor/warmup/b12x_warmup.py
@@ -30,7 +30,7 @@ index aa0971b4c55ed08435cf21689eb332865d9fa075..fb792c4716882a87b49257adc3d7c17f
    - tests/kernels/quantization/test_block_fp8.py
    - tests/quantization/reference_mxfp4.py
    - tests/quantization/test_auto_round.py
-@@ -732,6 +737,13 @@ steps:
+@@ -733,6 +738,13 @@ steps:
        kernels/quantization/test_block_fp8.py
        kernels/moe/test_b12x.py
        quantization/test_auto_round.py -k b12x
@@ -874,7 +874,7 @@ index 59046a5f3e8d6115a206cfeb4affb25b92a89e87..b8e07dd0d1f918f456728f394808eb3a
 +    }
 +    assert not active_buckets
 diff --git a/vllm/config/kernel.py b/vllm/config/kernel.py
-index fa3ecf5df95da3b2cc3da73b8601686698f7dc25..89280e024023ad05355704b839804fa75c22a9fe 100644
+index 5c4b877fd795865d50a9e05a5601800e1920ebdc..e4466dea2f87feb9e5306c618fd385d1d6ac94e1 100644
 --- a/vllm/config/kernel.py
 +++ b/vllm/config/kernel.py
 @@ -246,6 +246,7 @@ LinearBackend = Literal[
@@ -905,10 +905,10 @@ index fa3ecf5df95da3b2cc3da73b8601686698f7dc25..89280e024023ad05355704b839804fa7
      """If True, run FlashInfer autotuning during kernel warmup."""
  
 diff --git a/vllm/model_executor/kernels/linear/__init__.py b/vllm/model_executor/kernels/linear/__init__.py
-index 484143ffc14a0ac49486101fc423115a2c9c9965..575781630d4b73dffa64c138362bad683cca8751 100644
+index 0ce22f477ac79fbf2866f44c55e5ad77914d787d..6cfcf116d3f085597089858d9c9cd6a66b80f25e 100644
 --- a/vllm/model_executor/kernels/linear/__init__.py
 +++ b/vllm/model_executor/kernels/linear/__init__.py
-@@ -1138,6 +1138,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+@@ -1180,6 +1180,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
          elif not prefers_humming(compute_capability):
              force_kernel = MarlinNvFp4LinearKernel
  
@@ -1352,10 +1352,10 @@ index 1c095d6f091c8bc932cd4058bfd1e89f6f141b85..020f465cedc33b7fc2607bf8bbfd9a03
          if self.expert_gate is not None:
              out = F.sigmoid(self.expert_gate(x)[0]) * out
 diff --git a/vllm/model_executor/warmup/kernel_warmup.py b/vllm/model_executor/warmup/kernel_warmup.py
-index 685b33a5652a23cc28eb5eeddc0cd1e59bd017c2..ec932733b1c767519be47426883437d5bbc5b16f 100644
+index b7bf50865fca831c808bb958717da612a2d790b8..bf72e2c32ad14b1f6a294317071fd083142c4a3d 100644
 --- a/vllm/model_executor/warmup/kernel_warmup.py
 +++ b/vllm/model_executor/warmup/kernel_warmup.py
-@@ -340,6 +340,19 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
+@@ -335,6 +335,19 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
      max_tokens = runner.scheduler_config.max_num_batched_tokens
      # Tune the widest bucket set first so bounded passes reuse its configs.
      token_counts = [max_tokens]
@@ -1375,7 +1375,7 @@ index 685b33a5652a23cc28eb5eeddc0cd1e59bd017c2..ec932733b1c767519be47426883437d5
      token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
      return tuple(dict.fromkeys(token_counts))
  
-@@ -377,13 +390,23 @@ def _run_flashinfer_autotune_dummy_runs(
+@@ -372,13 +385,23 @@ def _run_flashinfer_autotune_dummy_runs(
          # Round M up to match serving-time bucket selection for non-bucket M.
          # See https://github.com/flashinfer-ai/flashinfer/issues/5450
          with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):

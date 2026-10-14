@@ -3,13 +3,13 @@ Subject: [PATCH] [Bugfix] Widen the QSA raw-key ring instead of asserting divisi
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/54912
 Upstream-Commit: 77b5ae7e2d9ce2dec02ea9bf40fa96ed4e53a071
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 diff --git a/tests/models/qwen4_exp/test_config.py b/tests/models/qwen4_exp/test_config.py
-index fb4dbc3c3703a73360953bde79c109d0686d1596..7800bb69973ecb7445e02792dda9a47be0acb31f 100644
+index 7d23c3aed129642f838d4246b640c95b52140222..1ace9ed5111cf42afd3e86d77e74ee865195a4d4 100644
 --- a/tests/models/qwen4_exp/test_config.py
 +++ b/tests/models/qwen4_exp/test_config.py
-@@ -14,7 +14,12 @@ from vllm.model_executor.models.config import (
+@@ -15,7 +15,12 @@ from vllm.model_executor.models.config import (
      Qwen3_5ForConditionalGenerationConfig,
      Qwen4ExpForConditionalGenerationConfig,
  )
@@ -22,7 +22,7 @@ index fb4dbc3c3703a73360953bde79c109d0686d1596..7800bb69973ecb7445e02792dda9a47b
  from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
  
  from ...utils import spawn_new_process_for_each_test
-@@ -281,3 +286,39 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
+@@ -319,3 +324,39 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
      )
      assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
      assert second["ngram_context"].data_ptr() == ngram_context_ptr

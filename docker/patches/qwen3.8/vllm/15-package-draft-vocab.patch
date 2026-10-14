@@ -1,6 +1,6 @@
 Subject: Include the Flash Next draft vocabulary in exported vLLM wheels
 
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 diff --git a/setup.py b/setup.py
 index b173b9dca8fd4d1cb5f4948816b52a99ac0843ab..6a104a60c3b3b676f436de8b09e6d0ba5bbe1682 100644

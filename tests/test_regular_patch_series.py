@@ -2,6 +2,7 @@
 """Exercise source-series application and lane guards without Docker or GPUs."""
 
 import ast
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -274,6 +275,40 @@ class PatchSeriesTests(unittest.TestCase):
             runner.reload_weights()
         self.assertEqual(events, [])
 
+    def test_lookahead_hashing_survives_kv_cache_planning_move(self):
+        # #61183 moved the planning functions following the hasher to another
+        # module. The hash helpers must still apply without restoring them.
+        upstream, updated = self.apply_upstream_excerpt(
+            "06-pr50897.patch", "vllm/v1/core/kv_cache_utils.py",
+            "kv_cache_planning_move_upstream.py",
+            ("+def generate_lookahead_block_hash_extra_keys(",),
+        )
+        helpers = {
+            "generate_lookahead_block_hash_extra_keys",
+            "generate_request_block_hash_extra_keys",
+        }
+        after = ast.parse(updated)
+        after.body = [n for n in after.body if getattr(n, "name", None) not in helpers]
+        self.assertEqual(ast.dump(ast.parse(upstream)), ast.dump(after))
+
+        extra_keys = Mock(side_effect=[(("block-image",), 4), (("next-image",), 5)])
+        namespace = {"generate_block_hash_extra_keys": extra_keys}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        request = SimpleNamespace(all_token_ids=[10, 11, 12, 13, 14])
+        generate = namespace["generate_request_block_hash_extra_keys"]
+        self.assertEqual(
+            generate(request, 0, 4, 3, True),
+            ((("block-image",), 14, ("next-image",)), 4),
+        )
+        self.assertEqual(
+            [call.args for call in extra_keys.call_args_list],
+            [(request, 0, 4, 3), (request, 4, 5, 4)],
+        )
+        extra_keys.reset_mock(side_effect=True)
+        extra_keys.return_value = (None, 4)
+        self.assertEqual(generate(request, 0, 4, 3, False), (None, 4))
+        extra_keys.assert_called_once_with(request, 0, 4, 3)
+
     def test_core_and_mooncake_retain_matching_replay_boundaries(self):
         _, core = self.apply_upstream_excerpt(
             "06-pr50897.patch", "vllm/v1/core/kv_cache_coordinator.py",
@@ -317,7 +352,7 @@ class PatchSeriesTests(unittest.TestCase):
             with self.subTest(prompt=prompt, lookahead=lookahead, eagle=eagle):
                 groups = {0} if eagle else set()
                 core_coord.eagle_group_ids = store_coord.eagle_group_ids = groups
-                core_coord.use_lookahead_block_hashes = lookahead
+                core_coord.drop_eagle_group_ids = set() if lookahead else groups
                 core_coord.cache_blocks(SimpleNamespace(num_prompt_tokens=prompt), 96)
                 self.assertEqual(
                     manager.cache_blocks.call_args.kwargs["replay_boundaries"], expected
@@ -333,6 +368,253 @@ class PatchSeriesTests(unittest.TestCase):
                     self.assertEqual(
                         call.kwargs["use_eagle"], eagle and not lookahead and group == 0
                     )
+
+    def test_file_gather_implements_embedding_interface(self):
+        _, updated = self.apply_upstream_excerpt(
+            "01-pr59958.patch", "vllm/models/qwen4_exp/nvidia/ngram_embedding.py",
+            "ple_file_gather_interface_upstream.py",
+            ("class Qwen4ExpPLEFileGatherEmbedding",),
+        )
+        namespace = {
+            "ABC": ABC, "abstractmethod": abstractmethod,
+            "PLEVocabParallelEmbedding": type("PLEVocabParallelEmbedding", (), {}),
+            "nn": SimpleNamespace(Module=object),
+        }
+        exec("from __future__ import annotations\n" + updated, namespace)
+        embedding_cls = namespace["Qwen4ExpPLEFileGatherEmbedding"]
+        # Allocation alone enforces ABC completeness, before tensor allocation
+        # or loading weights. This is the startup failure with either loader.
+        embedding = embedding_cls.__new__(embedding_cls)
+        self.assertFalse(embedding.supports_prefetch)
+        self.assertIsNone(embedding.start_prefetch(object()))
+        with self.assertRaisesRegex(RuntimeError, "does not support prefetch"):
+            embedding.finalize_prefetch(total_tokens=4)
+
+    def test_ple_sequence_parallel_preserves_full_token_rows(self):
+        _, updated = self.apply_upstream_excerpt(
+            "01-pr59958.patch", "vllm/models/qwen4_exp/nvidia/ngram_embedding.py",
+            "ple_sequence_parallel_upstream.py",
+            ("self.use_reduce_scatter =", "embedding.finalize_prefetch("),
+        )
+
+        class Rows(list):
+            dtype = "bf16"
+
+            @property
+            def shape(self):
+                return (len(self),)
+
+            def flatten(self, _):
+                return self
+
+            def view(self, _):
+                return self
+
+        class DeviceEmbedding:
+            supports_prefetch = False
+
+            def __init__(self, *args, reduce_results, **kwargs):
+                self.reduce_results = reduce_results
+
+            def __call__(self, ids):
+                return Rows([2 if self.reduce_results else 1] * len(ids))
+
+        class PinnedEmbedding(DeviceEmbedding):
+            supports_prefetch = True
+
+            def finalize_prefetch(self, *, total_tokens):
+                return super().__call__(range(total_tokens))
+
+        class FileEmbedding(DeviceEmbedding):
+            def __call__(self, tokens):
+                # File gather already has every rank's vocabulary rows.
+                return Rows([2] * len(tokens))
+
+        namespace = {
+            "Qwen4ExpPLEDeviceEmbedding": DeviceEmbedding,
+            "Qwen4ExpPLEPinnedHostEmbedding": PinnedEmbedding,
+            "Qwen4ExpPLEFileGatherEmbedding": FileEmbedding,
+            "is_fp8": lambda _: False,
+            "get_tp_group": lambda: SimpleNamespace(world_size=2),
+            "sp_shard": lambda rows: Rows(rows[:len(rows) // 2]),
+            "sp_reduce_scatter": lambda rows: Rows(
+                [2 * value for value in rows[:len(rows) // 2]]
+            ),
+        }
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for storage in ("device", "pinned", "file"):
+            for sequence_parallel in (False, True):
+                for etp_size in (1, 2):
+                    with self.subTest(storage=storage, sp=sequence_parallel, etp=etp_size):
+                        config = SimpleNamespace(
+                            host_file_gather=storage == "file",
+                            cpu_offload=storage == "pinned",
+                        )
+                        namespace["get_current_vllm_config"] = lambda: SimpleNamespace(
+                            engram_config=config
+                        )
+                        namespace["get_etp_group"] = lambda: SimpleNamespace(
+                            world_size=etp_size
+                        )
+                        module = namespace["Qwen4ExpNGramEmbedding"]()
+                        module.use_sequence_parallel = sequence_parallel
+                        module.head_dim = module.ngram_heads = 1
+                        module.configure_embedding("bf16", 8, 1, "ple", None, 4, 0)
+                        module.compute_ngram_ids = lambda ids, *_: ids
+                        hidden = Rows([0] * (2 if sequence_parallel else 4))
+                        result = module.forward(hidden, Rows(range(4)), None, None)
+                        self.assertEqual(result, [2] * len(hidden))
+
+    def test_confidence_stop_disables_fused_decode_after_metadata_refactor(self):
+        _, updated = self.apply_upstream_excerpt(
+            "04-pr60068.patch",
+            "vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py",
+            "draft_metadata_upstream.py", ("def _configure_decode_metadata_update",),
+        )
+
+        class BaseSpeculator:
+            def _configure_decode_metadata_update(self):
+                self.supports_decode_metadata_update = self.backend_supports_update
+
+        namespace = {"DraftModelSpeculator": BaseSpeculator}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for steps in (1, 3):
+            for stop in (None, object()):
+                for supported in (False, True):
+                    with self.subTest(steps=steps, stop=stop is not None, backend=supported):
+                        speculator = namespace["TargetDependentARSpeculator"]()
+                        speculator.num_speculative_steps = steps
+                        speculator.confidence_stop = stop
+                        speculator.backend_supports_update = supported
+                        speculator._configure_decode_metadata_update()
+                        self.assertEqual(
+                            speculator.supports_decode_metadata_update,
+                            steps > 1 and stop is None and supported,
+                        )
+
+    def test_resident_csf_preserves_modelopt_block_quant_dispatch(self):
+        # #59604 adds IQ2/Q8 dispatch at the resident-CSF insertion point.
+        _, updated = self.apply_upstream_excerpt(
+            "16-flash-next-fp4.patch",
+            "vllm/model_executor/layers/quantization/modelopt.py",
+            "modelopt_block_quant_upstream.py", ("+            and envs.VLLM_CSF_RESIDENT",),
+        )
+        linear = type("LinearBase", (), {})
+        embedding = type("VocabParallelEmbedding", (), {})
+        head = type("ParallelLMHead", (embedding,), {})
+        experts = type("RoutedExperts", (), {"moe_config": object()})
+        block_linear, block_moe, resident, state, regular = (Mock() for _ in range(5))
+        envs = SimpleNamespace(VLLM_CSF_RESIDENT=False)
+        namespace = {
+            "__name__": "series_quant.modelopt", "__package__": "series_quant",
+            "Attention": type("Attention", (), {}), "LinearBase": linear,
+            "VocabParallelEmbedding": embedding, "ParallelLMHead": head,
+            "RoutedExperts": experts, "envs": envs,
+            "B12X_BLOCK_CODECS": {"iq2_xs": (256, 74), "iq2_xxs": (256, 66),
+                                  "q8_0": (32, 34)},
+            "_BLOCK_FP8_MOE_ALGOS": set(), "ModelOptNvFp4FusedMoE": regular,
+        }
+        exec("from __future__ import annotations\n" + updated, namespace)
+        config = namespace["ModelOptMixedPrecisionConfig"]()
+        config.is_layer_excluded = lambda _: False
+        config._resolve_weight_scale_encoding = Mock(return_value="csf")
+        config._csf_state = None
+        config.nvfp4_config, config.w4a16_nvfp4_config = object(), object()
+        modules = {
+            "series_quant.modelopt_block_quant": SimpleNamespace(
+                ModelOptBlockQuantLinearMethod=block_linear,
+                ModelOptBlockQuantMoEMethod=block_moe,
+            ),
+            "series_quant.nvfp4_csf": SimpleNamespace(
+                Nvfp4CsfMoEMethod=resident, Nvfp4CsfState=state,
+            ),
+        }
+        with patch.dict("sys.modules", modules):
+            for enabled in (False, True):
+                envs.VLLM_CSF_RESIDENT = enabled
+                for codec in ("IQ2_XS", "IQ2_XXS", "Q8_0"):
+                    config._resolve_quant_algo = lambda _: codec
+                    for layer_type in (linear, embedding, head, experts):
+                        with self.subTest(enabled=enabled, codec=codec, layer=layer_type):
+                            layer = layer_type()
+                            factory = block_moe if layer_type is experts else block_linear
+                            self.assertIs(
+                                config.get_quant_method(layer, "model.layer"),
+                                factory.return_value,
+                            )
+                            args = (layer.moe_config,) if layer_type is experts else ()
+                            factory.assert_called_once_with(*args, codec=codec.lower())
+                            factory.reset_mock()
+                    with self.assertRaisesRegex(ValueError, "requires a linear"):
+                        config.get_quant_method(object(), "model.layer")
+            config._resolve_weight_scale_encoding.assert_not_called()
+            resident.assert_not_called()
+            state.assert_not_called()
+
+            layer = experts()
+            for algo, subconfig in (("NVFP4", config.nvfp4_config),
+                                    ("W4A16_NVFP4", config.w4a16_nvfp4_config)):
+                config._resolve_quant_algo = lambda _: algo
+                for enabled, encoding in ((False, "csf"), (True, None), (True, "csf")):
+                    with self.subTest(algo=algo, enabled=enabled, encoding=encoding):
+                        envs.VLLM_CSF_RESIDENT = enabled
+                        config._resolve_weight_scale_encoding.return_value = encoding
+                        result = config.get_quant_method(layer, "model.layer")
+                        if enabled and encoding == "csf":
+                            self.assertIs(result, resident.return_value)
+                            resident.assert_called_once_with(
+                                layer.moe_config, state.return_value,
+                                use_a16=algo == "W4A16_NVFP4",
+                            )
+                            regular.assert_not_called()
+                        else:
+                            self.assertIs(result, regular.return_value)
+                            regular.assert_called_once_with(
+                                quant_config=subconfig, moe_config=layer.moe_config,
+                            )
+                            resident.assert_not_called()
+                        resident.reset_mock()
+                        regular.reset_mock()
+            state.assert_called_once_with()
+
+    def test_resident_csf_loader_preserves_default_decoding(self):
+        _, updated = self.apply_upstream_excerpt(
+            "16-flash-next-fp4.patch",
+            "vllm/model_executor/model_loader/default_loader.py",
+            "csf_loader_before_resident.py", ("# Apply the prefix.",),
+        )
+        decoded_scale, packed_weight, fixed, exceptions = (object() for _ in range(4))
+        compressed = [
+            ("expert.weight", packed_weight),
+            ("expert.weight_scale.nvfp4_csf_fixed", fixed),
+            ("expert.weight_scale.nvfp4_csf_exceptions", exceptions),
+        ]
+        decoded = [("expert.weight", packed_weight), ("expert.weight_scale", decoded_scale)]
+        decode = Mock(return_value=iter(decoded))
+        envs = SimpleNamespace(VLLM_CSF_RESIDENT=False)
+        namespace = {
+            "envs": envs, "decode_csf_scale_streams": decode,
+            "time": SimpleNamespace(perf_counter=lambda: 123.0),
+        }
+        exec("from __future__ import annotations\n" + updated, namespace)
+        loader = namespace["DefaultModelLoader"]()
+        loader.counter_before_loading_weights = 0.0
+        source = SimpleNamespace(prefix="model.")
+        iterator = iter(compressed)
+        self.assertEqual(
+            list(loader.weights(source, iterator)),
+            [("model." + name, tensor) for name, tensor in decoded],
+        )
+        decode.assert_called_once_with(iterator)
+        self.assertEqual(loader.counter_before_loading_weights, 123.0)
+
+        envs.VLLM_CSF_RESIDENT = True
+        decode.reset_mock()
+        self.assertEqual(
+            list(loader.weights(source, iter(compressed))),
+            [("model." + name, tensor) for name, tensor in compressed],
+        )
+        decode.assert_not_called()
 
 
 if __name__ == "__main__":

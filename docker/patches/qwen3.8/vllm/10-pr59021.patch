@@ -3,13 +3,13 @@ Subject: [PATCH] [Kernel] Allow steering the unquantized linear backend independ
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/59021
 Upstream-Commit: 0d1a683a3471ce352ef5a9aa2d7a9616bd1ac4bf
-Integration-Base: 3c062d391d15cfa41d3f321cad24f3030c892a97
+Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
 
 diff --git a/vllm/config/kernel.py b/vllm/config/kernel.py
-index 1f187b09f784f8f3d6f46c180f9e5542d43ecc33..7b37dc32abb0eb57eaa8b7b0d9be262e38ced9d9 100644
+index 3d6eee04ffc07e72c8526bcc92d81e480e1498ff..dd6fe8282a230f8793b431e3c213643d1c7c34f3 100644
 --- a/vllm/config/kernel.py
 +++ b/vllm/config/kernel.py
-@@ -411,6 +411,11 @@ class KernelConfig:
+@@ -417,6 +417,11 @@ class KernelConfig:
      precedence over ``linear_backend``; for example,
      ``{"nvfp4_w4a16": "humming"}``."""
  
@@ -21,7 +21,7 @@ index 1f187b09f784f8f3d6f46c180f9e5542d43ecc33..7b37dc32abb0eb57eaa8b7b0d9be262e
      @field_validator("moe_backend", mode="before")
      @classmethod
      def _normalize_moe_backend(cls, value: Any) -> Any:
-@@ -418,7 +423,7 @@ class KernelConfig:
+@@ -424,7 +429,7 @@ class KernelConfig:
              return value.lower().replace("-", "_")
          return value
  
@@ -31,10 +31,10 @@ index 1f187b09f784f8f3d6f46c180f9e5542d43ecc33..7b37dc32abb0eb57eaa8b7b0d9be262e
      def _normalize_linear_backend(cls, value: Any) -> Any:
          if isinstance(value, str):
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
-index 31777e266f8be21f06a99ecdc256edd5dbff970e..ec86d47f20228d1336a4a81fbfd2320368e0f7d4 100644
+index c9aa433162d2bc2a0585af949c58469eff69f2d2..697b4cd39c67e64d8b0875c48fba439f2f88890e 100644
 --- a/vllm/engine/arg_utils.py
 +++ b/vllm/engine/arg_utils.py
-@@ -548,6 +548,9 @@ class EngineArgs:
+@@ -561,6 +561,9 @@ class EngineArgs:
      sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
          KernelConfig.sparse_indexer_topk_backend
      )
@@ -44,7 +44,7 @@ index 31777e266f8be21f06a99ecdc256edd5dbff970e..ec86d47f20228d1336a4a81fbfd23203
      all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
      enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
      elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
-@@ -1802,6 +1805,15 @@ class EngineArgs:
+@@ -1826,6 +1829,15 @@ class EngineArgs:
          kernel_group.add_argument(
              "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
          )
@@ -60,7 +60,7 @@ index 31777e266f8be21f06a99ecdc256edd5dbff970e..ec86d47f20228d1336a4a81fbfd23203
  
          # vLLM arguments
          vllm_kwargs = get_kwargs(VllmConfig)
-@@ -2747,6 +2759,10 @@ class EngineArgs:
+@@ -2776,6 +2788,10 @@ class EngineArgs:
              kernel_config.linear_backend = self.linear_backend
          if self.sparse_indexer_topk_backend != "auto":
              kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend

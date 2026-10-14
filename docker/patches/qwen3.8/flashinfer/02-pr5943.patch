@@ -3,7 +3,7 @@ Subject: [PATCH] feat(gemm): add SM12x MXFP8 support to the CuTe DSL mm_mxfp8 ba
 
 Upstream-PR: https://github.com/flashinfer-ai/flashinfer/pull/5943
 Upstream-Commit: 15c5c8d21388c118558c8370299204aa4b110ced
-Integration-Base: 34bb66e4d0b420b5a03c99b2b6a1c0831dfaa738
+Integration-Base: 74ca44b318a3be013649baabca698099d0862e3c
 
 diff --git a/benchmarks/routines/flashinfer_benchmark_utils.py b/benchmarks/routines/flashinfer_benchmark_utils.py
 index 4dadfb48507125d0f5e4f85f62050a9f55872781..de919eb296fb99403e2cc3bdcb41a0d149b81b87 100644
@@ -144,7 +144,7 @@ index 7902ab5d6b356e0d0c98eb5a9e3dcc306786724f..16c59ebc53ea574f477998fd705ba714
  
          # Median, not mean: robust to first-iteration instrumentation
 diff --git a/flashinfer/gemm/gemm_base.py b/flashinfer/gemm/gemm_base.py
-index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730bab8e20e 100644
+index 97f6282caeee9662a467500cc866d3a9527216e9..cf3ef46d76d8eb52fce6d80d7f9ab9e68ac9beb7 100644
 --- a/flashinfer/gemm/gemm_base.py
 +++ b/flashinfer/gemm/gemm_base.py
 @@ -6013,12 +6013,14 @@ def _check_mm_mxfp8_problem_size(
@@ -203,9 +203,9 @@ index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730
      # CuTe DSL MXFP8 path currently expects swizzled 1D block scales
      # in F8_128x4 layout for both A and B.
      if a_descale.ndim != 1 or b_descale.ndim != 1:
-@@ -6389,6 +6404,11 @@ def _cute_dsl_gemm_mxfp8_runner(
-     enable_pdl: bool,
+@@ -6390,6 +6405,11 @@ def _cute_dsl_gemm_mxfp8_runner(
      out_dtype: torch.dtype,
+     warp_splitk_supports: Optional[Callable[[List[torch.Tensor]], bool]] = None,
  ):
 +    if sm_major == 12:
 +        from .kernels.sm12x_mxfp8.runner import get_runner
@@ -215,7 +215,7 @@ index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730
      import cutlass
  
      from .kernels.dense_blockscaled_gemm_sm100 import (
-@@ -7003,7 +7023,8 @@ def mm_mxfp8(
+@@ -7133,7 +7153,8 @@ def mm_mxfp8(
  
      out: Optional[torch.Tensor]
          Out tensor, shape (m, n), bf16 or fp16. If provided, the result is written
@@ -225,7 +225,7 @@ index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730
          Defaults to ``None``.
  
      out_dtype: torch.dtype
-@@ -7022,7 +7043,17 @@ def mm_mxfp8(
+@@ -7152,7 +7173,17 @@ def mm_mxfp8(
            small-M decode tiles. It requires CUDA 13+, nvidia-cutlass-dsl >=
            4.6.0, 1D swizzled 128x4 scales, and K divisible by 128.
          - The ``"cute-dsl"`` backend currently requires swizzled 1D scales
@@ -244,7 +244,7 @@ index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730
          - The ``"cutedsl_low_latency"`` backend requires SM100/SM103, ``M <= 8``,
            ``K % 128 == 0``, and swizzled 1D scales in the 128x4 layout.
          - The ``"trtllm"`` requires b to be quantized with 128x4 swizzle layout and shuffled.
-@@ -7119,11 +7150,12 @@ def mm_mxfp8(
+@@ -7260,11 +7291,12 @@ def mm_mxfp8(
  
      tuner = AutoTuner.get()
  
@@ -260,9 +260,9 @@ index c8760abc037350b98372de173d9842429ebc9305..9975c15a03609affaf28aa0e50fa0730
 +    else:
 +        tuning_config = _MM_MXFP8_TUNING_CONFIG
  
-     inputs = [
-         a,
-@@ -9124,6 +9156,17 @@ _MM_MXFP8_CUTE_DSL_TUNING_CONFIG = replace(
+     runner, tactic = tuner.choose_one(
+         custom_op="mxfp8_gemm",
+@@ -9265,6 +9297,17 @@ _MM_MXFP8_CUTE_DSL_TUNING_CONFIG = replace(
      use_cold_l2_cache=True,
  )
  
@@ -5070,10 +5070,10 @@ index dbf4501f7454025f63154855984bc009867695f6..82115c2312b6ffac9b2e761518e045ce
  
  def test_tuning_config_profiling_repeat_override(monkeypatch):
 diff --git a/tests/gemm/test_mm_mxfp8.py b/tests/gemm/test_mm_mxfp8.py
-index b1d5d428e740fb9908e2fe0d96378a5bdeac4537..54824bf342817ac22d2ed99fc79e29ae373b2ef5 100644
+index ad6ddddb909f1a4546faeadbf8c058427fe5444b..1fb0331330d0f3a8b99bcb2f255c4694d4e6a32b 100644
 --- a/tests/gemm/test_mm_mxfp8.py
 +++ b/tests/gemm/test_mm_mxfp8.py
-@@ -172,6 +172,8 @@ def test_mm_mxfp8_cute_dsl_narrow_tiles_only_within_32_tokens():
+@@ -173,6 +173,8 @@ def test_mm_mxfp8_cute_dsl_narrow_tiles_only_within_32_tokens():
      offer them while the kernel-N extent (n, or m when A and B are swapped)
      is at most 32."""
      _skip_if_unsupported("cute-dsl")

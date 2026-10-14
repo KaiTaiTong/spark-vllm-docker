@@ -2,8 +2,8 @@ From: stecasta
 Subject: [PATCH] Canonical-layout NVFP4 W4A4 MoE in CuTe DSL on SM12x
 
 Upstream-PR: https://github.com/flashinfer-ai/flashinfer/pull/5863
-Upstream-Commit: a0997210fd45b9e3f35cddd44660137175824fe1
-Integration-Base: 34bb66e4d0b420b5a03c99b2b6a1c0831dfaa738
+Upstream-Commit: 51a74ab43e5be5e3b7a18a2f8d736906077e60e8
+Integration-Base: 74ca44b318a3be013649baabca698099d0862e3c
 
 Preserve both upstream cuDNN and SM12x MoE benchmark coverage.
 
@@ -40,7 +40,7 @@ index 357f8cb0152097186e47318600077e87c859d3df..dd07833c8bb24dec004d914ceb0da48d
  --routine unified_moe --backends cutlass cutile cudnn --quant-variant fp8 --num_tokens 128 --hidden_size 2048 --intermediate_size 512 --num_experts 256 --top_k 8 --activation-type Swiglu --input_dtype bfloat16 --autotune --refcheck -vv --generate_repro_command --case_tag "qwen3.6_35b_a3b_fp8"
  --routine unified_moe --backends cutile --quant-variant fp8_w8a16 --num_tokens 8 --hidden_size 2048 --intermediate_size 512 --num_experts 256 --top_k 8 --activation-type Swiglu --input_dtype bfloat16 --autotune --refcheck -vv --generate_repro_command --case_tag "qwen3.6_35b_a3b_fp8_w8a16"
 diff --git a/docs/design_docs/flashinfer_moe_api.md b/docs/design_docs/flashinfer_moe_api.md
-index ea2ae11d4e663491985a0f5bb67e9a8e8b1c5dfc..2c4daf3e33fafc02f1dd47b65240b21fd7c8ff72 100644
+index 467ec13af0f6932ecf09baedfab3df66d4bda82a..bf1c924b33dc04953dbae3c3bb49d9c360bddab0 100644
 --- a/docs/design_docs/flashinfer_moe_api.md
 +++ b/docs/design_docs/flashinfer_moe_api.md
 @@ -895,6 +895,7 @@ python scripts/generate_moe_activation_matrix.py --write
@@ -83,10 +83,10 @@ index b676008bf496e519cd5c2ccac35546f8be1aed65..d9657d2ab2825da083804e87d9c47023
      "TrtllmFp4Config",
      "TrtllmFp8BlockConfig",
 diff --git a/flashinfer/fused_moe/api.py b/flashinfer/fused_moe/api.py
-index e7f6d24b9db504e61a97c9e1bc07424fd4cd7592..15063a1ba23f7d122a87ae54de0956b592ea9943 100644
+index d81be5271d176f27ff7efadc250914509aca0184..87b0f4382d8b4f89dff8571e0666f9ce3e4947d3 100644
 --- a/flashinfer/fused_moe/api.py
 +++ b/flashinfer/fused_moe/api.py
-@@ -2383,6 +2383,65 @@ class SM12xNvfp4Bf16Config:
+@@ -2394,6 +2394,65 @@ class SM12xNvfp4Bf16Config:
          return "SM12xNvfp4Bf16Config()"
  
  
@@ -152,7 +152,7 @@ index e7f6d24b9db504e61a97c9e1bc07424fd4cd7592..15063a1ba23f7d122a87ae54de0956b5
  @dataclass(frozen=True)
  class B12xNvfp4Config:
      """SM120/SM121 CuTe-DSL b12x NVFP4/W4A4 backend."""
-@@ -2586,6 +2645,7 @@ BackendConfigType = Union[
+@@ -2597,6 +2656,7 @@ BackendConfigType = Union[
      SM12xFp8Config,
      SM12xMxfp8Mxfp4Config,
      SM12xNvfp4Bf16Config,
@@ -160,7 +160,7 @@ index e7f6d24b9db504e61a97c9e1bc07424fd4cd7592..15063a1ba23f7d122a87ae54de0956b5
      B12xNvfp4Config,
      B12xW4A16Config,
  ]
-@@ -2629,6 +2689,7 @@ ALL_BACKEND_CONFIGS = (
+@@ -2640,6 +2700,7 @@ ALL_BACKEND_CONFIGS = (
      SM12xFp8Config,
      SM12xMxfp8Mxfp4Config,
      SM12xNvfp4Bf16Config,
@@ -1521,10 +1521,10 @@ index d9f5b6888335fc6e9fd5e92faaa40fe329618e57..2605518020b354b0d770ee42a2ec2212
      TrtllmBf16Config: TrtllmBf16RoutedRunner,
      TrtllmFp8BlockConfig: TrtllmFp8BlockRunner,
 diff --git a/flashinfer/fused_moe/runners.py b/flashinfer/fused_moe/runners.py
-index 9bb167f42137103b1839b6eaada728ffb3babbc2..df9f99d2a8f31820b2408160445b29c50ef739ae 100644
+index 90a0bb9d9dc00bfcfef832d9a864a1df9a79fe07..1eaab05465c4b5290035f7878cf07161f11cd1a8 100644
 --- a/flashinfer/fused_moe/runners.py
 +++ b/flashinfer/fused_moe/runners.py
-@@ -8349,6 +8349,162 @@ class SM12xNvfp4Bf16Runner(MoERunner):
+@@ -8348,6 +8348,162 @@ class SM12xNvfp4Bf16Runner(MoERunner):
          return out[: getattr(inputs, "num_tokens", out.shape[0])]
  
  
