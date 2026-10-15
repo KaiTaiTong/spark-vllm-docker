@@ -20,7 +20,7 @@ available independently.
 
 The vLLM order is:
 
-1. [#59958](https://github.com/vllm-project/vllm/pull/59958), including #56273 and #58815: NVFP4 PLE tables.
+1. [#59958](https://github.com/vllm-project/vllm/pull/59958) and #58815: host-file-gather PLE tables, using #56273's NVFP4 support already in main.
 2. [#59973](https://github.com/vllm-project/vllm/pull/59973): quantized draft heads.
 3. [#59740](https://github.com/vllm-project/vllm/pull/59740) and [#60226](https://github.com/vllm-project/vllm/pull/60226): sparse draft vocabulary, including quantized heads.
 4. [#60068](https://github.com/vllm-project/vllm/pull/60068): adaptive draft depth.
@@ -55,6 +55,40 @@ W4A4 MoE), then [#5943](https://github.com/flashinfer-ai/flashinfer/pull/5943)
 `15c5c8d21388c118558c8370299204aa4b110ced`.
 
 ## Integration and refresh
+
+On October 14, the series was refreshed against vLLM
+`355553ac22dca4080929ea8f88a446f15df1f3ba` and FlashInfer
+`2895577720741ddfedff118202c89584996b8875`. The complete vLLM series also
+replays on the failed nightly base `3f466c852cfd3882820af8dd7963ac775174bce4`.
+
+[#56273](https://github.com/vllm-project/vllm/pull/56273) merged as
+`4e0681ed5654c1d8afb3c104d4381afd08529de8`. Patch 01 now contains only the
+remaining file-gather integration; merged NVFP4 definitions and tests come
+from main. Its header records the merged dependency separately. Existing
+`host_file_gather` configuration, sequence-parallel behavior, and loader fixes
+are retained. #59958's newer `disk_offload` rewrite is not adopted in this
+compatibility fix; its recorded host-file-gather snapshot remains unchanged.
+
+Two other PR snapshots were updated:
+
+- #59973 at `c8ce09384e` selects the NVFP4 draft-head kernel through
+  `init_nvfp4_linear_kernel`, retaining the platform/backend selection policy.
+- #50897 at `7f7139246a` keeps legacy EAGLE dropping with HiSparse, updates
+  Mooncake lookahead tails, and moves the shared gating helper to
+  `kv_cache_utils.py`. Its conflicts with newer Mooncake capacity-only workers,
+  sleep-mode declarations, offload metrics, and Mamba checkpoint code are
+  resolved while preserving those upstream features.
+
+Validation: all 16 vLLM patches and all 17 subsequent Docker source patchers
+pass on both vLLM bases. The 2 FlashInfer patches and loader include-order fix
+pass on the recorded FlashInfer base. All 151 changed Python files compile;
+both draft vocabularies and wheel package-data rules remain intact. The 16
+series tests, 28 SWA tests, 100 build-selection checks, 28 CPU loader tests,
+nine PLE constructor cases, and three Mooncake integration checks pass.
+The new regression applies the decoder integration to the merged NVFP4 code
+and checks device, pinned, and file-gather dispatch. Existing upstream PLE
+tests remain unchanged. The native-reader test is skipped on CPU; GPU builds
+and inference remain for CI. Validation applies to the recorded commits.
 
 Later on October 13, patch 16 was rebased on vLLM
 `624a5ddafd96df23fe2b9f6d4b8f52a08b9fe9ea` after

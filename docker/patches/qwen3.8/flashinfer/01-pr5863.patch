@@ -3,7 +3,7 @@ Subject: [PATCH] Canonical-layout NVFP4 W4A4 MoE in CuTe DSL on SM12x
 
 Upstream-PR: https://github.com/flashinfer-ai/flashinfer/pull/5863
 Upstream-Commit: 51a74ab43e5be5e3b7a18a2f8d736906077e60e8
-Integration-Base: 74ca44b318a3be013649baabca698099d0862e3c
+Integration-Base: 2895577720741ddfedff118202c89584996b8875
 
 Preserve both upstream cuDNN and SM12x MoE benchmark coverage.
 
@@ -83,7 +83,7 @@ index b676008bf496e519cd5c2ccac35546f8be1aed65..d9657d2ab2825da083804e87d9c47023
      "TrtllmFp4Config",
      "TrtllmFp8BlockConfig",
 diff --git a/flashinfer/fused_moe/api.py b/flashinfer/fused_moe/api.py
-index d81be5271d176f27ff7efadc250914509aca0184..87b0f4382d8b4f89dff8571e0666f9ce3e4947d3 100644
+index e07d1a871848d7c30fa14dcda66115e0bd717859..4796d77659680a552a50afd8573e9922e1a5ea60 100644
 --- a/flashinfer/fused_moe/api.py
 +++ b/flashinfer/fused_moe/api.py
 @@ -2394,6 +2394,65 @@ class SM12xNvfp4Bf16Config:
@@ -1485,7 +1485,7 @@ index 0000000000000000000000000000000000000000..bc3ed05f3f355a27284c7d284b356dd6
 +    compiled(*args)
 +    return out
 diff --git a/flashinfer/fused_moe/layer.py b/flashinfer/fused_moe/layer.py
-index d9f5b6888335fc6e9fd5e92faaa40fe329618e57..2605518020b354b0d770ee42a2ec22121c6f23b9 100644
+index 942e30214fdfb78d6c4bc5a17b67669191b469aa..c04556cb3ad89620cb854e205f77c13136a802ba 100644
 --- a/flashinfer/fused_moe/layer.py
 +++ b/flashinfer/fused_moe/layer.py
 @@ -72,6 +72,7 @@ from .api import (
@@ -1504,7 +1504,7 @@ index d9f5b6888335fc6e9fd5e92faaa40fe329618e57..2605518020b354b0d770ee42a2ec2212
      TrtllmBf16RoutedRunner,
      TrtllmFp4RoutedRunner,
      TrtllmFp8BlockRunner,
-@@ -158,6 +160,7 @@ _RunnerT = Union[
+@@ -157,6 +159,7 @@ _RunnerT = Union[
      SM12xFp8Runner,
      SM12xMxfp8Mxfp4Runner,
      SM12xNvfp4Bf16Runner,
@@ -1512,7 +1512,7 @@ index d9f5b6888335fc6e9fd5e92faaa40fe329618e57..2605518020b354b0d770ee42a2ec2212
      TrtllmFp4RoutedRunner,
      TrtllmBf16RoutedRunner,
      TrtllmFp8BlockRunner,
-@@ -202,6 +205,7 @@ _BACKEND_RUNNERS: Dict[type, Type[_RunnerT]] = {
+@@ -201,6 +204,7 @@ _BACKEND_RUNNERS: Dict[type, Type[_RunnerT]] = {
      SM12xFp8Config: SM12xFp8Runner,
      SM12xMxfp8Mxfp4Config: SM12xMxfp8Mxfp4Runner,
      SM12xNvfp4Bf16Config: SM12xNvfp4Bf16Runner,
@@ -1521,10 +1521,10 @@ index d9f5b6888335fc6e9fd5e92faaa40fe329618e57..2605518020b354b0d770ee42a2ec2212
      TrtllmBf16Config: TrtllmBf16RoutedRunner,
      TrtllmFp8BlockConfig: TrtllmFp8BlockRunner,
 diff --git a/flashinfer/fused_moe/runners.py b/flashinfer/fused_moe/runners.py
-index 90a0bb9d9dc00bfcfef832d9a864a1df9a79fe07..1eaab05465c4b5290035f7878cf07161f11cd1a8 100644
+index 3eca781d254a993d68d9a425bbefc2519770e2b5..86c05670550ef0097ff27f620ef19540781a9b5d 100644
 --- a/flashinfer/fused_moe/runners.py
 +++ b/flashinfer/fused_moe/runners.py
-@@ -8348,6 +8348,162 @@ class SM12xNvfp4Bf16Runner(MoERunner):
+@@ -8358,6 +8358,162 @@ class SM12xNvfp4Bf16Runner(MoERunner):
          return out[: getattr(inputs, "num_tokens", out.shape[0])]
  
  
@@ -1688,7 +1688,7 @@ index 90a0bb9d9dc00bfcfef832d9a864a1df9a79fe07..1eaab05465c4b5290035f7878cf07161
  # SM12x b12x runners - fixed tactic, existing wrapper delegation
  # ---------------------------------------------------------------------------
 diff --git a/tests/moe/test_unified_moe_cutile.py b/tests/moe/test_unified_moe_cutile.py
-index 6144002b4f6c32b942e5eea801cd628e8092da6b..2bf0fd0d903d9cc2b192a5efc462def828823be8 100644
+index 97b717ca5b2967bceb89f6aa1c30fc26cda88f80..9500725769a197e1ca0bcba395e4fbaf1aa1266a 100644
 --- a/tests/moe/test_unified_moe_cutile.py
 +++ b/tests/moe/test_unified_moe_cutile.py
 @@ -53,7 +53,9 @@ from flashinfer.fused_moe import (
@@ -1701,7 +1701,7 @@ index 6144002b4f6c32b942e5eea801cd628e8092da6b..2bf0fd0d903d9cc2b192a5efc462def8
      SiLU,
      SiTU,
      SwiGLU,
-@@ -2904,3 +2906,428 @@ def test_sm12x_nvfp4_bf16_competes_with_cutile_in_one_layer():
+@@ -2917,3 +2919,428 @@ def test_sm12x_nvfp4_bf16_competes_with_cutile_in_one_layer():
      }
      act = make_activations(0)
      _assert_moe_close(layer(act, weights), reference(act))

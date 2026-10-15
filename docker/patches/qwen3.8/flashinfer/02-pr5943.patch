@@ -3,7 +3,7 @@ Subject: [PATCH] feat(gemm): add SM12x MXFP8 support to the CuTe DSL mm_mxfp8 ba
 
 Upstream-PR: https://github.com/flashinfer-ai/flashinfer/pull/5943
 Upstream-Commit: 15c5c8d21388c118558c8370299204aa4b110ced
-Integration-Base: 74ca44b318a3be013649baabca698099d0862e3c
+Integration-Base: 2895577720741ddfedff118202c89584996b8875
 
 diff --git a/benchmarks/routines/flashinfer_benchmark_utils.py b/benchmarks/routines/flashinfer_benchmark_utils.py
 index 4dadfb48507125d0f5e4f85f62050a9f55872781..de919eb296fb99403e2cc3bdcb41a0d149b81b87 100644

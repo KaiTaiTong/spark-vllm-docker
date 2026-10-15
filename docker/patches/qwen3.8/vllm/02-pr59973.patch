@@ -2,11 +2,12 @@ From: stecasta
 Subject: [PATCH] [MRV2][Spec Decode] Quantized draft lm_head for drafters that share the target head
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/59973
-Upstream-Commit: ff04de5eb49bd6d2c4fab8812fed92528a29beb3
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Upstream-Commit: c8ce09384e26189519586610ae1aa75bbf1f14f6
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 Preserve #60937's native MRV2 weight reload and cache resets. Keep the
 quantized draft-head refresh in reset_lora_state for reloads and transfers.
+Use the upstream NVFP4 kernel selector for draft heads.
 
 diff --git a/docs/features/speculative_decoding/mtp.md b/docs/features/speculative_decoding/mtp.md
 index 3b637c9de8ad77fe2b7a2c360ff7ff0a4904094b..34d8f9539b74a7ef8edd8252f7244dc37be98d0e 100644
@@ -26,7 +27,7 @@ index 3b637c9de8ad77fe2b7a2c360ff7ff0a4904094b..34d8f9539b74a7ef8edd8252f7244dc3
 +  counted in the model weights, so with `--kv-cache-memory-bytes` leave room
 +  for it.
 diff --git a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
-index c61838a65520af5b9767930f70587c4558875476..08f91b3baa799969c29300292eacd9afa6809db2 100644
+index c61838a65520af5b9767930f70587c4558875476..893594b0a7317d685372240648d0c64e76aa3d35 100644
 --- a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 +++ b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 @@ -6,6 +6,11 @@ import pytest
@@ -41,7 +42,7 @@ index c61838a65520af5b9767930f70587c4558875476..08f91b3baa799969c29300292eacd9af
  from .._correctness import check_mtp_correctness
  
  
-@@ -37,3 +42,102 @@ def test_mtp_correctness(
+@@ -37,3 +42,107 @@ def test_mtp_correctness(
          expected_accuracy_threshold,
          vllm_runner,
      )
@@ -58,7 +59,9 @@ index c61838a65520af5b9767930f70587c4558875476..08f91b3baa799969c29300292eacd9af
 +    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 +    prompts = get_test_prompts(mm_enabled=False)
 +    results = {}
-+    for quant in (None, "fp8", "nvfp4"):
++    # NVFP4 needs a CUDA W4A16 kernel.
++    quants = (None, "fp8", "nvfp4") if current_platform.is_cuda() else (None, "fp8")
++    for quant in quants:
 +        with vllm_runner(
 +            "Qwen/Qwen3.5-0.8B-Base",
 +            block_size=None,
@@ -91,6 +94,9 @@ index c61838a65520af5b9767930f70587c4558875476..08f91b3baa799969c29300292eacd9af
 +
 +
 +@single_gpu_only
++@pytest.mark.skipif(
++    not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
++)
 +def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
 +    monkeypatch: pytest.MonkeyPatch,
 +    sampling_config: SamplingParams,
@@ -146,10 +152,10 @@ index c61838a65520af5b9767930f70587c4558875476..08f91b3baa799969c29300292eacd9af
 +        assert al == pytest.approx(ref_al, rel=0.03)
 diff --git a/tests/v1/worker/test_gpu_draft_lm_head.py b/tests/v1/worker/test_gpu_draft_lm_head.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785190cccd1
+index 0000000000000000000000000000000000000000..75ceee15bb335b4c69c8ce36176a60dae1f2f5e8
 --- /dev/null
 +++ b/tests/v1/worker/test_gpu_draft_lm_head.py
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,217 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +import gc
@@ -170,6 +176,7 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +    record_metadata_for_reloading,
 +)
 +from vllm.model_executor.model_loader.weight_utils import default_weight_loader
++from vllm.platforms import current_platform
 +from vllm.v1.worker.gpu_worker import Worker
 +
 +# Not a multiple of the vocab padding, so the head has padded rows.
@@ -177,6 +184,11 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +requires_cuda = pytest.mark.skipif(
 +    not torch.cuda.is_available(), reason="Marlin needs CUDA"
 +)
++# NVFP4 needs a CUDA W4A16 kernel; ROCm only runs the fp8 cases.
++requires_nvfp4 = pytest.mark.skipif(
++    not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
++)
++NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
 +
 +
 +def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -199,7 +211,7 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +@requires_cuda
 +@pytest.mark.parametrize(
 +    ("quantization", "max_rel_err", "min_top1"),
-+    [("fp8", 0.05, 0.9), ("nvfp4", 0.15, 0.75)],
++    [("fp8", 0.05, 0.9), pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4)],
 +)
 +def test_tracks_bf16_head_through_logits_processor(
 +    default_vllm_config, dist_init, monkeypatch, quantization, max_rel_err, min_top1
@@ -225,7 +237,7 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +
 +
 +@requires_cuda
-+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
++@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 +def test_refresh_follows_target_update(
 +    default_vllm_config, dist_init, monkeypatch, quantization
 +):
@@ -295,7 +307,7 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +
 +
 +@requires_cuda
-+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
++@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
 +def test_draft_weight_update_loads_lm_head(
 +    default_vllm_config, dist_init, monkeypatch, quantization
 +):
@@ -336,6 +348,7 @@ index 0000000000000000000000000000000000000000..11d9354d9a40a4a5565ea8b2d4958785
 +
 +
 +@requires_cuda
++@requires_nvfp4
 +def test_layerwise_reload_of_drafter_keeps_copy(
 +    default_vllm_config, dist_init, monkeypatch
 +):
@@ -375,7 +388,7 @@ index ec63c08c70c4b96c9f2b8aef9bbadbc5cc312614..61d6f38e08525a1d3dd30516a8efc951
  def _make_worker(engine: _RecordingEngine | None) -> Worker:
      worker = object.__new__(Worker)
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index b916d7da2bed09362fbfd3593efb4d8f97abee3a..cb9573fd6b5f8f58d6107f2e5654fed30c6063e4 100644
+index b916d7da2bed09362fbfd3593efb4d8f97abee3a..c4d44eaccae36eadd53d88c8c6c60103cc5b4db6 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -454,6 +454,12 @@ class SpeculativeConfig:
@@ -385,9 +398,9 @@ index b916d7da2bed09362fbfd3593efb4d8f97abee3a..cb9573fd6b5f8f58d6107f2e5654fed3
 +    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
 +    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
 +    MTP). "fp8" uses per-row weight and per-token activation scales on the
-+    platform's FP8 linear kernel; "nvfp4" is weight-only on the Marlin kernel.
-+    The target verifies with its own head, so only the acceptance length can
-+    change. Model Runner V2 only."""
++    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
++    W4A16 kernel. The target verifies with its own head, so only the
++    acceptance length can change. Model Runner V2 only."""
      use_local_argmax_reduction: bool = False
      """Use vocab-parallel local argmax instead of all-gathering full logits
      for draft token generation. Reduces communication from O(vocab_size) to
@@ -413,10 +426,10 @@ index b916d7da2bed09362fbfd3593efb4d8f97abee3a..cb9573fd6b5f8f58d6107f2e5654fed3
              raise ValueError(
                  "Expected num_speculative_tokens to be greater "
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index d6e834861a19a5bee291ac6098f327c66c2a21b2..86696928649505cc4ddbceefc7889eec5e0c064c 100644
+index 58fe85c50e29003e774678068789fd24539343f3..ca072b6d0c1d91be5454bbe0b0f42b363a579c0f 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -2979,6 +2979,8 @@ class VllmConfig:
+@@ -2992,6 +2992,8 @@ class VllmConfig:
                  unsupported.append("dspark speculative decoding")
              if self.speculative_config.enable_adaptive_verification:
                  unsupported.append("adaptive draft verification")
@@ -427,10 +440,10 @@ index d6e834861a19a5bee291ac6098f327c66c2a21b2..86696928649505cc4ddbceefc7889eec
          if self._dflash_needs_multi_kv_group():
 diff --git a/vllm/model_executor/layers/quantization/online/lm_head.py b/vllm/model_executor/layers/quantization/online/lm_head.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520fc72804b
+index 0000000000000000000000000000000000000000..9543aab9c0d3bf3de8c1410e641664fee5f1d62c
 --- /dev/null
 +++ b/vllm/model_executor/layers/quantization/online/lm_head.py
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,204 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Online-quantized copies of an already-loaded lm_head."""
@@ -443,18 +456,11 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +from torch.nn import Module, Parameter
 +
 +from vllm.logger import init_logger
++from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 +from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 +from vllm.model_executor.layers.quantization.online.fp8 import (
 +    Fp8PtpcOnlineLinearMethod,
 +    OnlineLinearBase,
-+)
-+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-+    marlin_make_workspace_new,
-+)
-+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-+    apply_fp4_marlin_linear,
-+    is_fp4_marlin_supported,
-+    prepare_fp4_layer_for_marlin,
 +)
 +from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
 +    FLOAT4_E2M1_MAX,
@@ -478,7 +484,7 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +    """NVFP4-quantize the rows of `weight` without the SM100+ quant kernel.
 +
 +    Returns packed E2M1 codes (low nibble first), E4M3 scales per 16 values and
-+    the fp32 dequantization global scale, in the layout Marlin expects.
++    the fp32 dequantization global scale, in the checkpoint layout.
 +    """
 +    fp8_max = torch.finfo(torch.float8_e4m3fn).max
 +    global_scale = (weight_amax(weight).float() / (FLOAT4_E2M1_MAX * fp8_max)).clamp(
@@ -502,38 +508,27 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +    return packed, scales, global_scale
 +
 +
-+class _LMHeadNvfp4MarlinMethod(OnlineLinearBase):
-+    """NVFP4 lm_head copy on the W4A16 Marlin kernel; activations stay in the
-+    model dtype."""
++class _LMHeadNvfp4Method(OnlineLinearBase):
++    """Weight-only NVFP4 lm_head copy on the platform's W4A16 kernel;
++    activations stay in the model dtype."""
 +
 +    def process_weights_after_loading(self, layer: Module) -> None:
 +        packed, scales, global_scale = _quantize_nvfp4(layer.weight)
 +        replace_parameter(layer, "weight", packed)
 +        layer.weight_scale = Parameter(scales, requires_grad=False)
 +        layer.weight_global_scale = Parameter(global_scale, requires_grad=False)
-+        prepare_fp4_layer_for_marlin(layer)
-+        layer.register_buffer(
-+            "workspace", marlin_make_workspace_new(packed.device), persistent=False
-+        )
++        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
++        self.kernel.process_weights_after_loading(layer)
 +
 +    def apply(
 +        self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
 +    ) -> torch.Tensor:
-+        return apply_fp4_marlin_linear(
-+            x,
-+            layer.weight,
-+            layer.weight_scale,
-+            layer.weight_global_scale,
-+            layer.workspace,
-+            layer.output_size_per_partition,
-+            layer.input_size_per_partition,
-+            bias,
-+        )
++        return self.kernel.apply_weights(layer, x, bias)
 +
 +
 +_LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 +    "fp8": Fp8PtpcOnlineLinearMethod,
-+    "nvfp4": _LMHeadNvfp4MarlinMethod,
++    "nvfp4": _LMHeadNvfp4Method,
 +}
 +
 +
@@ -548,11 +543,6 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +        raise ValueError(
 +            "Quantizing an lm_head copy needs an unquantized fp16/bf16 lm_head "
 +            "without bias."
-+        )
-+    if quantization == "nvfp4" and not is_fp4_marlin_supported():
-+        raise ValueError(
-+            "nvfp4 lm_head quantization needs a CUDA GPU with compute capability "
-+            "7.5 or newer."
 +        )
 +    # Online methods take their output dtype from the default dtype, which is
 +    # only the model dtype while the model itself is being built.
@@ -589,7 +579,8 @@ index 0000000000000000000000000000000000000000..fdaec93a348037918051c9306730d520
 +    """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 +
 +    "fp8" uses per-row weight and per-token activation scales on the platform's
-+    FP8 linear kernel; "nvfp4" is weight-only on Marlin. `lm_head` is left
++    FP8 linear kernel; "nvfp4" is weight-only on the
++    platform's W4A16 kernel. `lm_head` is left
 +    unchanged and no bf16 copy of its weight is made. The copy is derived state:
 +    `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
 +    """
@@ -678,7 +669,7 @@ index 92e65c839dbf40fa3b983e57e2364eb7cbf52654..574aed3090fe422f376075c60bf3c023
          self.quant_config = quant_config
          if bias:
 diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
-index 57cef586f81fd48337bf43a437c392127ecc1a6b..8fc681d19cd9ce99826e04ad1b562120d3f46c08 100644
+index 08e70f33800c507f273c4fb14d4cfd02858f1ce5..9615667d435f3499ee24ca565a75e13c149beb4b 100644
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
 @@ -33,7 +33,7 @@ import vllm.envs as envs
@@ -760,7 +751,7 @@ index 65289bb18e6af0ad4b8ef84968b2ed03fd6a70f8..63e999b75fbfa7278fece3bf1d80a595
      # MTP shares topk_indices_buffer with the target model. We update
      # every module in the draft that holds a buffer reference so that
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 04feb5da025a6072f100eaba485baefe74247aaa..9747a39dc6711c1c606889836b0431eb0dd21cbe 100644
+index 62a11d1eabda346e3db36fe59d1ce0d0fdcdcb33..00a2cf76d0e1d206a756c80b27a864bbce2f8342 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -62,6 +62,10 @@ from vllm.distributed.weight_transfer import (
@@ -774,7 +765,7 @@ index 04feb5da025a6072f100eaba485baefe74247aaa..9747a39dc6711c1c606889836b0431eb
  from vllm.model_executor.model_loader import get_model_loader
  from vllm.model_executor.model_loader.weight_checksum import (
      compute_tensor_digests,
-@@ -1537,12 +1541,19 @@ class Worker(WorkerBase):
+@@ -1532,12 +1536,19 @@ class Worker(WorkerBase):
                  "active. Call finish_weight_update first."
              )
  
@@ -794,7 +785,7 @@ index 04feb5da025a6072f100eaba485baefe74247aaa..9747a39dc6711c1c606889836b0431eb
              raise
          self._weight_update_active = True
          self._weight_update_is_draft = is_draft
-@@ -1582,6 +1593,10 @@ class Worker(WorkerBase):
+@@ -1577,6 +1588,10 @@ class Worker(WorkerBase):
              except BaseException:
                  self._weight_update_active = False
                  self.weight_transfer_engine.reset_weight_update_target()
@@ -805,7 +796,7 @@ index 04feb5da025a6072f100eaba485baefe74247aaa..9747a39dc6711c1c606889836b0431eb
                  raise
  
      def finish_weight_update(self) -> None:
-@@ -1598,6 +1613,10 @@ class Worker(WorkerBase):
+@@ -1593,6 +1608,10 @@ class Worker(WorkerBase):
              self.weight_transfer_engine.finish_weight_update()
              self.weight_transfer_engine.reset_weight_update_target()
              self._weight_update_active = False

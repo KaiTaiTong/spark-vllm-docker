@@ -390,6 +390,72 @@ class PatchSeriesTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "does not support prefetch"):
             embedding.finalize_prefetch(total_tokens=4)
 
+    def test_file_gather_reuses_merged_nvfp4_lookup(self):
+        # #56273 is now in main. Apply only the remaining shared-decoder
+        # integration to its real device and pinned lookup implementations.
+        _, updated = self.apply_upstream_excerpt(
+            "01-pr59958.patch", "vllm/models/qwen4_exp/common/ngram_embedding.py",
+            "nvfp4_ple_merged_upstream.py",
+            ("+    def lookup_rows(",
+             "-        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)]("),
+        )
+        launch = Mock()
+        grids = []
+
+        class Kernel:
+            def __getitem__(self, grid):
+                grids.append(grid)
+                return launch
+
+        ids = Mock(device="cuda", shape=(4,), is_cuda=True)
+        ids.numel.return_value = 4
+        ids.reshape.return_value = ids
+        output = SimpleNamespace(shape=(4, 160))
+        layer = SimpleNamespace(
+            weight=SimpleNamespace(shape=(8, 80)), weight_scale=Mock(),
+            weight_scale_2=object(), params_dtype="bf16", embedding_dim=160,
+            _uva_weight=object(), shard_indices=SimpleNamespace(
+                org_vocab_start_index=8, org_vocab_end_index=16,
+            ),
+        )
+        namespace = {
+            "torch": SimpleNamespace(empty=Mock(return_value=output), uint8="uint8"),
+            "triton": SimpleNamespace(next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
+            "_lookup_nvfp4_ple_embedding_kernel": Kernel(),
+        }
+        exec("from __future__ import annotations\n" + updated, namespace)
+        method = namespace["Qwen4ExpPLENvFp4EmbeddingMethod"]()
+        method._uva_weight_scale = Mock()
+        self.assertIs(method.embedding(layer, ids), output)
+        launch.assert_called_once_with(
+            layer.weight, layer.weight_scale.view.return_value,
+            layer.weight_scale_2, ids, output, 160, 0, 8, BLOCK_D=256,
+        )
+        layer.weight_scale.view.assert_called_once_with("uint8")
+
+        launch.reset_mock()
+        method.lookup_from_pinned(layer, ids, output)
+        launch.assert_called_once_with(
+            layer._uva_weight, method._uva_weight_scale.view.return_value,
+            layer.weight_scale_2, ids, output, 160, 8, 16, BLOCK_D=256,
+        )
+        method._uva_weight_scale.view.assert_called_once_with("uint8")
+
+        launch.reset_mock()
+        staged_weight, staged_scale = object(), Mock()
+        method.lookup_rows(staged_weight, staged_scale, layer.weight_scale_2,
+                           ids, output, 0, 4)
+        launch.assert_called_once_with(
+            staged_weight, staged_scale.view.return_value,
+            layer.weight_scale_2, ids, output, 160, 0, 4, BLOCK_D=256,
+        )
+        self.assertEqual(grids, [(4,), (4,), (4,)])
+        launch.reset_mock()
+        ids.numel.return_value = 0
+        method.lookup_rows(staged_weight, staged_scale, layer.weight_scale_2,
+                           ids, output, 0, 0)
+        launch.assert_not_called()
+
     def test_ple_sequence_parallel_preserves_full_token_rows(self):
         _, updated = self.apply_upstream_excerpt(
             "01-pr59958.patch", "vllm/models/qwen4_exp/nvidia/ngram_embedding.py",

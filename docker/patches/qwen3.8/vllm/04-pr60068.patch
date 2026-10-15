@@ -3,7 +3,7 @@ Subject: [PATCH] [PR #60068] [MRV2][Spec Decode] Opt-in confidence stop for auto
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/60068
 Upstream-Commit: 8ae78ccaf8825b3e55ab014e282c769902ca198c
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 Preserve both quantized draft-head and adaptive-depth documentation/tests.
 Use #60692's supports_decode_metadata_update API; confidence stopping
@@ -73,7 +73,7 @@ index 99eb02ff3389274efe04d875c2088e8017e77d54..5800fe030553a592d62df807ba5f50bc
      scheduler = create_scheduler(num_speculative_tokens=3)
      assert scheduler.spec_decode_metrics_level == "none"
 diff --git a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
-index 08f91b3baa799969c29300292eacd9afa6809db2..ad1aeb5d4b83d0b6d85e9c140679c6a56fedf323 100644
+index 893594b0a7317d685372240648d0c64e76aa3d35..57f3468e8ee8b25c3bf85f7a24eaf5d49ca34bb4 100644
 --- a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 +++ b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 @@ -5,10 +5,12 @@ import pytest
@@ -89,7 +89,7 @@ index 08f91b3baa799969c29300292eacd9afa6809db2..ad1aeb5d4b83d0b6d85e9c140679c6a5
      get_test_prompts,
  )
  from .._correctness import check_mtp_correctness
-@@ -141,3 +143,58 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
+@@ -146,3 +148,58 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
              context="after weight reload",
          )
          assert al == pytest.approx(ref_al, rel=0.03)
@@ -389,7 +389,7 @@ index 42678aa9d1f864c11d8d4636b31fb2a8f57a7518..f69c3c177b1ec33142b3683e6678914d
      vllm_config = SimpleNamespace(
          speculative_config=speculative_config,
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index e0b8d4c6ebdb6a52538a759bcfef4ca2b8acf858..48c1c04edc8ce6f83be2f884a0606450d8553b08 100644
+index 2d82a6b3f0446f1b6a0f09a591352c6e732f3d48..001e94d8b663ea0ea058be0a04ee33ee559ec096 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -586,6 +586,18 @@ class SpeculativeConfig:
@@ -412,7 +412,7 @@ index e0b8d4c6ebdb6a52538a759bcfef4ca2b8acf858..48c1c04edc8ce6f83be2f884a0606450
      def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
          """Mean acceptance length to unconditional per-position rates, using
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index df9c0c1a789147c1aa55c4cd373c38081846b4b7..b710948406c3553e02ae39d24e60bc2532667ca8 100644
+index 054cdd2849b9bdc48230d39aa234b502b34811c4..abad73f52bea097230f4360ec22387957b86c493 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
 @@ -1074,6 +1074,44 @@ class VllmConfig:
@@ -460,7 +460,7 @@ index df9c0c1a789147c1aa55c4cd373c38081846b4b7..b710948406c3553e02ae39d24e60bc25
      def _normalize_piecewise_cudagraph_mode(
          self, *, breakable_cudagraph_enabled: bool
      ) -> None:
-@@ -1785,6 +1823,7 @@ class VllmConfig:
+@@ -1798,6 +1836,7 @@ class VllmConfig:
              )
  
          self._maybe_disable_dynamic_sd_for_data_parallel()
@@ -557,10 +557,10 @@ index 3a6409db55468ad8840276b3e63509fcfb31ac05..62a21adb67b0d422919bfa4ebf83957f
                          continue
  
 diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
-index 8fc681d19cd9ce99826e04ad1b562120d3f46c08..17813de757718ed92c049f388822e4455b69923f 100644
+index 9615667d435f3499ee24ca565a75e13c149beb4b..9ac61c0acdd07bbf6ef1ada23e9084b37485e58c 100644
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
-@@ -1326,6 +1326,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+@@ -1328,6 +1328,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
              num_draft_tokens_np = np.fromiter(
                  num_drafts_iter, dtype=np.int32, count=num_reqs
              )
@@ -582,7 +582,7 @@ index 8fc681d19cd9ce99826e04ad1b562120d3f46c08..17813de757718ed92c049f388822e445
              if self.adaptive_verification is not None:
                  num_toks = self.adaptive_verification.get_num_tokens(
                      num_tokens_per_req, draft_tokens
-@@ -1768,6 +1783,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+@@ -1770,6 +1785,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          )
          if batch_req_state is not None:
              num_toks = batch_req_state.num_tokens
@@ -590,7 +590,7 @@ index 8fc681d19cd9ce99826e04ad1b562120d3f46c08..17813de757718ed92c049f388822e445
              if batch_req_state.has_prefill:
                  # Varlen decode graphs replay decodes only, and their bound
                  # alone would admit a short prefill.
-@@ -2188,6 +2204,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+@@ -2190,6 +2206,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
              prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
              cudagraph_stats=cudagraph_stats,
          )

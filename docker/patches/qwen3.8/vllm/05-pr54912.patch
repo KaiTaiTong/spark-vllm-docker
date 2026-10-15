@@ -3,7 +3,7 @@ Subject: [PATCH] [Bugfix] Widen the QSA raw-key ring instead of asserting divisi
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/54912
 Upstream-Commit: 77b5ae7e2d9ce2dec02ea9bf40fa96ed4e53a071
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 diff --git a/tests/models/qwen4_exp/test_config.py b/tests/models/qwen4_exp/test_config.py
 index 7d23c3aed129642f838d4246b640c95b52140222..1ace9ed5111cf42afd3e86d77e74ee865195a4d4 100644

@@ -1,9 +1,9 @@
 Subject: Include the Flash Next draft vocabulary in exported vLLM wheels
 
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 diff --git a/setup.py b/setup.py
-index b173b9dca8fd4d1cb5f4948816b52a99ac0843ab..6a104a60c3b3b676f436de8b09e6d0ba5bbe1682 100644
+index abefefa35bc89df03e163c08158671ab5282dcfc..5793ffcd0aea3796f7d3f884dc66d72e872c45d8 100644
 --- a/setup.py
 +++ b/setup.py
 @@ -1600,6 +1600,7 @@ package_data = {

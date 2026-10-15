@@ -1,8 +1,8 @@
 Subject: [PATCH] [PR #50897] Lookahead-aware prefix cache hashing
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/50897
-Upstream-Commit: 0b9551fb788d471896233bcbd53f09489fe807b9
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Upstream-Commit: 7f7139246af9793d0cfb2a1be60068a5fba5604c
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 Preserve the draft-head/adaptive-depth tests and current upstream cache tests.
 Retain the Mooncake partial-tail integration: lookahead proof replaces the
@@ -13,6 +13,9 @@ Use the upstream drop_eagle_group_ids policy and lookahead-hash opt-out.
 Retain #61012's shared replay_boundaries helper in core and Mooncake.
 Preserve #61183's separation of KV-cache planning into kv_cache_planning.py;
 keep the lookahead hash helpers in kv_cache_utils.py.
+Use the current HiSparse/EAGLE gating and shared helper in kv_cache_utils.
+Preserve upstream capacity-only Mooncake workers, sleep-mode declarations,
+offload metrics, and Triton Mamba checkpoint helpers.
 
 diff --git a/tests/models/kimi_k3/test_kda_metadata.py b/tests/models/kimi_k3/test_kda_metadata.py
 index 65b29b44bdae59e4e22ae3552cf8f5b7dd67e346..fe1a059c978fa2a70733da343f1e82e90cd9563d 100644
@@ -71,10 +74,10 @@ index 65b29b44bdae59e4e22ae3552cf8f5b7dd67e346..fe1a059c978fa2a70733da343f1e82e9
      batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
      common_attn_metadata = create_common_attn_metadata(
 diff --git a/tests/v1/core/prefix_cache/test_mamba_eagle_resume_checkpoint.py b/tests/v1/core/prefix_cache/test_mamba_eagle_resume_checkpoint.py
-index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac6a7bd3d9 100644
+index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..1d61bbd03ce3351a9e30aebacf905a348fae431a 100644
 --- a/tests/v1/core/prefix_cache/test_mamba_eagle_resume_checkpoint.py
 +++ b/tests/v1/core/prefix_cache/test_mamba_eagle_resume_checkpoint.py
-@@ -36,6 +36,7 @@ def _manager(
+@@ -36,19 +36,24 @@ def _manager(
      num_blocks=8192,
      eagle_group=None,
      num_prefill_lookahead=0,
@@ -82,15 +85,27 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
  ):
      init_none_hash(sha256)
      config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
-@@ -49,6 +50,7 @@ def _manager(
++    groups = list(config.kv_cache_groups)
+     if eagle_group is not None:
+-        groups = list(config.kv_cache_groups)
+         groups[eagle_group] = replace(groups[eagle_group], is_eagle_group=True)
+-        config = replace(config, kv_cache_groups=groups)
++    elif lookahead:
++        # The scheduler clears ``use_eagle`` here, so flag the groups up front.
++        groups = [replace(group, is_eagle_group=True) for group in groups]
++    config = replace(config, kv_cache_groups=groups)
+     return make_kv_cache_manager(
+         kv_cache_config=config,
+         max_model_len=1 << 20,
          enable_caching=True,
          hash_block_size=hash_block_size,
-         use_eagle=True,
+-        use_eagle=True,
++        use_eagle=not lookahead,
 +        use_lookahead_block_hashes=lookahead,
          num_prefill_lookahead=num_prefill_lookahead,
          enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
      )
-@@ -69,8 +71,12 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
+@@ -69,8 +74,12 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
          max_num_scheduled_tokens=1 << 20,
          use_eagle=True,
          # The EAGLE adjustments key on the block-drop bit, not plain use_eagle:
@@ -105,7 +120,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
          hash_block_size=hash_block_size,
          mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
          mamba_partial_cache_hit=partial_hit,
-@@ -121,6 +127,16 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
+@@ -121,6 +130,16 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
      return ends
  
  
@@ -122,7 +137,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
  def _orphaned_full_attention_tail(manager, stub, prompt_len):
      """Produce the state a KV connector leaves behind, which creates a junction.
  
-@@ -129,14 +145,12 @@ def _orphaned_full_attention_tail(manager, stub, prompt_len):
+@@ -129,14 +148,12 @@ def _orphaned_full_attention_tail(manager, stub, prompt_len):
      producer starts past its own tail stop: full attention still registers a
      partial tail the Mamba group has no state for.
      """
@@ -140,7 +155,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      return manager.get_computed_blocks(request)[1]
  
  
-@@ -144,22 +158,21 @@ def _sibling_hit(manager, shared, suffix, hash_block_size):
+@@ -144,22 +161,21 @@ def _sibling_hit(manager, shared, suffix, hash_block_size):
  # The two positions a sibling resumes at
  
  
@@ -168,7 +183,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      assert hit == junction, (
          f"the chunk stopped at {junction} but nothing was cached there: "
          f"sibling resumes at {hit}"
-@@ -179,18 +192,16 @@ def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
+@@ -179,18 +195,16 @@ def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
      stub = _stub(manager, block_size, hash_block_size)
  
      shared = 24
@@ -190,7 +205,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      assert hit == resume, f"expected the resume point at {resume}, got {hit}"
  
  
-@@ -205,14 +216,11 @@ def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
+@@ -205,14 +219,11 @@ def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
      prompt_a = PREFIX[:1600]
      hit_after_mtp_block_drop = len(prompt_a) - hash_block_size
  
@@ -208,7 +223,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      assert hit == hit_after_mtp_block_drop
  
  
-@@ -232,7 +240,8 @@ def _armed_configs():
+@@ -232,7 +243,8 @@ def _armed_configs():
                  yield block_size, hash_block_size
  
  
@@ -218,7 +233,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      """A junction stop must always be a position the manager caches.
  
      "The scheduler schedules a number of tokens it thinks can be cached, but the
-@@ -246,15 +255,13 @@ def test_scheduler_never_stops_where_the_manager_refuses():
+@@ -246,15 +258,13 @@ def test_scheduler_never_stops_where_the_manager_refuses():
              3 * block_size + hash_block_size + 1,
              4 * block_size - 1,
          ):
@@ -236,7 +251,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
              junction = manager.get_computed_blocks(consumer)[2]
              if not junction:
                  continue
-@@ -266,9 +273,7 @@ def test_scheduler_never_stops_where_the_manager_refuses():
+@@ -266,9 +276,7 @@ def test_scheduler_never_stops_where_the_manager_refuses():
                  skipped.append(case)
                  continue
              evaluated += 1
@@ -247,7 +262,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
              if hit < junction:
                  refused.append(case + (hit,))
  
-@@ -295,7 +300,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
+@@ -295,7 +303,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
      manager = _manager(block_size, hash_block_size)
      stub = _stub(manager, block_size, hash_block_size)
  
@@ -256,7 +271,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      for _ in range(2000):
          request.append_output_token_ids(1)
      assert request.num_prompt_tokens == 2000 and request.num_tokens == 4000
-@@ -329,9 +334,10 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
+@@ -329,9 +337,10 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
      )
  
  
@@ -268,7 +283,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
      """Turning the flag on may add check-points; it must never move one away.
  
      Two axes decide whether the manager can honour the junction stop the
-@@ -352,14 +358,13 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
+@@ -352,14 +361,13 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
              shared_prefix_checkpoint=shared_prefix_checkpoint,
              eagle_group=eagle_group,
              num_prefill_lookahead=num_prefill_lookahead,
@@ -286,7 +301,7 @@ index 54ae43e8e232b5c3119612a0673ed8a698ec21d3..31c0b095eb6350190deeea9f8101ecac
  
      on, off = sibling_hit(True), sibling_hit(False)
      assert on >= off, f"enabling the flag cut the sibling's hit from {off} to {on}"
-@@ -372,15 +377,51 @@ def test_disabled_by_default():
+@@ -372,15 +380,51 @@ def test_disabled_by_default():
      stub = _stub(manager, block_size, hash_block_size)
      _orphaned_full_attention_tail(manager, stub, 2020)
  
@@ -494,7 +509,7 @@ index 65f38cdedfb2ebc7d33a886beeb247ae17e2ea37..965cff25cf7e1cf75cb732f8de6461ba
      # No connector: nothing is handed off, so keep the lossless deliver-stale
      # path on preemption.
 diff --git a/tests/v1/core/test_kv_cache_utils.py b/tests/v1/core/test_kv_cache_utils.py
-index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067cded57673 100644
+index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..3a88892bd8d25a34cb4575f8bf8418a528641c31 100644
 --- a/tests/v1/core/test_kv_cache_utils.py
 +++ b/tests/v1/core/test_kv_cache_utils.py
 @@ -6,7 +6,7 @@ import importlib
@@ -506,18 +521,23 @@ index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067c
  
  import pytest
  import torch
-@@ -28,6 +28,10 @@ from vllm.config import (
+@@ -28,6 +28,7 @@ from vllm.config import (
  )
  from vllm.config.attention import HiSparseConfig
  from vllm.config.kv_events import KVEventsConfig
 +from vllm.config.speculative import SpeculativeConfig
-+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-+    is_lookahead_block_hashing_enabled,
-+)
  from vllm.lora.request import LoRARequest
  from vllm.multimodal.inputs import (
      MultiModalFeatureSpec,
-@@ -260,6 +264,7 @@ def make_request(
+@@ -51,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
+     get_request_block_hasher,
+     hash_block_tokens,
+     init_none_hash,
++    is_lookahead_block_hashing_enabled,
+     make_block_hash_with_group_id,
+     tensor_data,
+     to_event_extra_keys,
+@@ -260,6 +262,7 @@ def make_request(
      mm_hashes: list[str] | None = None,
      cache_salt: str | None = None,
      prompt_embeds: torch.Tensor | None = None,
@@ -525,7 +545,7 @@ index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067c
  ):
      mm_features = []
      if mm_positions is not None:
-@@ -284,7 +289,9 @@ def make_request(
+@@ -284,7 +287,9 @@ def make_request(
          pooling_params=None,
          lora_request=None,
          cache_salt=cache_salt,
@@ -536,7 +556,7 @@ index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067c
          prompt_embeds=prompt_embeds,
      )
  
-@@ -1040,36 +1047,96 @@ def test_request_block_hasher(hash_fn):
+@@ -1040,36 +1045,100 @@ def test_request_block_hasher(hash_fn):
  
  
  @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -602,6 +622,7 @@ index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067c
 +            id="supporting-connector",
 +        ),
 +        pytest.param({"connector_support": False}, False, id="unsupported-connector"),
++        pytest.param({"hisparse": True}, False, id="hisparse"),
 +    ],
 +)
 +def test_lookahead_block_hashing_enabled(overrides: dict[str, Any], expected: bool):
@@ -624,6 +645,9 @@ index 1489315ec255ff8cb2cf87aa4318cd2426bc9c44..4775b324cbb7c69e6fd00f2f3fc4067c
 +                "num_prefill_lookahead_tokens", 1
 +            ),
 +            kv_transfer_config=None if connector_support is None else object(),
++            attention_config=SimpleNamespace(
++                hisparse_config=object() if overrides.get("hisparse") else None
++            ),
 +        ),
 +    )
 +    connector = (
@@ -684,7 +708,7 @@ index b1575239158d133680c853f89bd1554b8f6686e6..360c36f95920b39ebc5b4e1db8d3b046
      ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
      [
 diff --git a/tests/v1/core/test_prefix_caching.py b/tests/v1/core/test_prefix_caching.py
-index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e02439116675e853709 100644
+index 52455c6083056bd541b4bc3177bcbd833722ff2f..aaf095008681160413a9221ca6ae9859981cad58 100644
 --- a/tests/v1/core/test_prefix_caching.py
 +++ b/tests/v1/core/test_prefix_caching.py
 @@ -92,6 +92,7 @@ def make_request(
@@ -732,7 +756,8 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
          make_kv_cache_config(block_size, num_blocks=10),
          max_model_len=8192,
          enable_caching=True,
-         use_eagle=True,
+-        use_eagle=True,
++        use_eagle=not lookahead,
 +        use_lookahead_block_hashes=lookahead,
          hash_block_size=block_size,
      )
@@ -770,14 +795,14 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 -    # 2. drop last matched block → 1 remaining block
 -    assert len(computed_blocks.blocks[0]) == 1
 -    assert num_tokens == 1 * block_size  # 16 tokens
- 
++
 +def test_lookahead_token_controls_last_block_hit():
 +    block_size = 2
 +    manager = make_kv_cache_manager(
 +        make_kv_cache_config(block_size, num_blocks=20),
 +        max_model_len=8192,
 +        enable_caching=True,
-+        use_eagle=True,
++        use_eagle=False,
 +        use_lookahead_block_hashes=True,
 +        hash_block_size=block_size,
 +    )
@@ -820,7 +845,7 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 +        make_kv_cache_config(block_size, num_blocks=20),
 +        max_model_len=8192,
 +        enable_caching=True,
-+        use_eagle=True,
++        use_eagle=False,
 +        use_lookahead_block_hashes=True,
 +        hash_block_size=block_size,
 +        enable_kv_cache_events=True,
@@ -893,7 +918,7 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 +        config,
 +        max_model_len=8192,
 +        enable_caching=True,
-+        use_eagle=True,
++        use_eagle=False,
 +        use_lookahead_block_hashes=True,
 +        hash_block_size=hash_block_size,
 +    )
@@ -922,12 +947,12 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 +        use_lookahead_hashes=True,
 +    )
 +    _, num_computed, _ = manager.get_computed_blocks(second)
++
++    assert num_computed == 1248
+ 
  
 -def test_eagle_with_partial_blocks():
 -    """Test Eagle behavior with requests containing partial blocks."""
-+    assert num_computed == 1248
-+
-+
 +def test_lookahead_per_group_hits_stay_within_max_length():
 +    """Lookahead groups drop no block, so the per-group lookup must not widen
 +    by the EAGLE drop margin."""
@@ -961,7 +986,8 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 +        config,
          max_model_len=8192,
          enable_caching=True,
-         use_eagle=True,
+-        use_eagle=True,
++        use_eagle=False,
 +        use_lookahead_block_hashes=True,
          hash_block_size=block_size,
      )
@@ -1039,7 +1065,7 @@ index 52455c6083056bd541b4bc3177bcbd833722ff2f..292b615eba22c35ad9ba5e0243911667
 +        enable_caching=True,
 +        hash_block_size=block_size,
 +        retention_interval=0,
-+        use_eagle=True,
++        use_eagle=False,
 +        use_lookahead_block_hashes=True,
 +    )
 +
@@ -1254,10 +1280,10 @@ index 5800fe030553a592d62df807ba5f50bc1041d951..bcd508d6ccc476f01936cf7cc0a0e8cf
      scheduler.max_model_len = 128
  
 diff --git a/tests/v1/e2e/general/test_mamba_prefix_cache.py b/tests/v1/e2e/general/test_mamba_prefix_cache.py
-index cf8aee141bc5440a7b2b35ba2f38a4081a6e81ac..a430735df873444197fa979bb2f042029d4289ff 100644
+index 629450dba1e23bd960cca3f978d772411cab68ed..f7e7d23b8f244d1ff2f0847283b5f189e453ad87 100644
 --- a/tests/v1/e2e/general/test_mamba_prefix_cache.py
 +++ b/tests/v1/e2e/general/test_mamba_prefix_cache.py
-@@ -773,17 +773,20 @@ def get_mamba_prefix_cache_step_configs(
+@@ -780,17 +780,20 @@ def get_mamba_prefix_cache_step_configs(
                  ),
              ],
          ),
@@ -1281,7 +1307,7 @@ index cf8aee141bc5440a7b2b35ba2f38a4081a6e81ac..a430735df873444197fa979bb2f04202
                      (-1, -1),
                      (-1, -1),
                  ),
-@@ -810,12 +813,18 @@ def get_mamba_prefix_cache_step_configs(
+@@ -817,12 +820,18 @@ def get_mamba_prefix_cache_step_configs(
              num_generated_tokens=10,
              num_accepted_tokens=4,
              step_actions=[
@@ -1303,7 +1329,7 @@ index cf8aee141bc5440a7b2b35ba2f38a4081a6e81ac..a430735df873444197fa979bb2f04202
                      (-1, -1),
                      (-1, -1),
                  ),
-@@ -862,18 +871,18 @@ def get_mamba_prefix_cache_step_configs(
+@@ -869,18 +878,18 @@ def get_mamba_prefix_cache_step_configs(
                  StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                  StepAction(
                      B * 5,
@@ -1330,7 +1356,7 @@ index cf8aee141bc5440a7b2b35ba2f38a4081a6e81ac..a430735df873444197fa979bb2f04202
                      (-1, -1),
                  ),
              ],
-@@ -1225,11 +1234,11 @@ def _run_mamba_prefix_cache_mrv2(
+@@ -1353,12 +1362,12 @@ def _run_mamba_prefix_cache_mrv2(
          cleanup_dist_env_and_memory()
  
  
@@ -1344,8 +1370,9 @@ index cf8aee141bc5440a7b2b35ba2f38a4081a6e81ac..a430735df873444197fa979bb2f04202
 +@create_new_process_for_each_test("spawn")
  def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
      _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+ 
 diff --git a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
-index ad1aeb5d4b83d0b6d85e9c140679c6a56fedf323..bb276eee6eedf983c8d487cc1ac3a0752c572cf0 100644
+index 57f3468e8ee8b25c3bf85f7a24eaf5d49ca34bb4..73641c60dcbb0a1a82856052106ffbae7ceaed9e 100644
 --- a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 +++ b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
 @@ -2,9 +2,12 @@
@@ -1362,7 +1389,7 @@ index ad1aeb5d4b83d0b6d85e9c140679c6a56fedf323..bb276eee6eedf983c8d487cc1ac3a075
  from vllm.platforms import current_platform
  
  from ...utils import (
-@@ -198,3 +201,84 @@ def test_mtp_draft_confidence_stop(
+@@ -203,3 +206,84 @@ def test_mtp_draft_confidence_stop(
      assert al >= 0.9 * ref_al, f"acceptance length {al:.3f} vs {ref_al:.3f}"
      assert drafts_per_round[None] == 3
      assert 1 <= drafts_per_round[0.6] < 4, drafts_per_round
@@ -1721,10 +1748,10 @@ index e71c3dbf18d477eb70823a9a94940afd44a513a1..4382b3659c5614d31be00b3f739329e4
          runner.scheduler.reset_prefix_cache()
  
 diff --git a/tests/v1/kv_connector/unit/offloading_connector/utils.py b/tests/v1/kv_connector/unit/offloading_connector/utils.py
-index 9621890f3c266edb56b222018b768635dec42230..e808e0039cc3bcbcccc9c2a3d6df104f1e148539 100644
+index fda6ebfb4f6b17f9f47959b43f477bd182b55f90..faacb9db755622c8587f85bec39b4e958300aa2a 100644
 --- a/tests/v1/kv_connector/unit/offloading_connector/utils.py
 +++ b/tests/v1/kv_connector/unit/offloading_connector/utils.py
-@@ -350,7 +350,12 @@ class RequestRunner:
+@@ -351,7 +351,12 @@ class RequestRunner:
          self.gpu_blocks: dict[int, GPUBlock] = {}
  
          init_none_hash(sha256)
@@ -1738,7 +1765,7 @@ index 9621890f3c266edb56b222018b768635dec42230..e808e0039cc3bcbcccc9c2a3d6df104f
  
          self._dummy_ctx: ForwardContext = ForwardContext(
              no_compile_layers={},
-@@ -369,7 +374,7 @@ class RequestRunner:
+@@ -370,7 +375,7 @@ class RequestRunner:
          token_ids: list[int],
          kv_transfer_params: dict | None = None,
          skip_reading_prefix_cache: bool = False,
@@ -1747,7 +1774,7 @@ index 9621890f3c266edb56b222018b768635dec42230..e808e0039cc3bcbcccc9c2a3d6df104f
          self.req_id += 1
  
          sampling_params = SamplingParams(
-@@ -389,6 +394,7 @@ class RequestRunner:
+@@ -390,6 +395,7 @@ class RequestRunner:
              req.kv_transfer_params = kv_transfer_params
  
          self.scheduler.add_request(req)
@@ -1791,10 +1818,10 @@ index 65abd910bbcf85d9dd0882f0566d7c7aa4a495ed..506412d4eb49c3dfc6d3cbfa074a6bde
      monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
      vllm_config = create_vllm_config(
 diff --git a/tests/v1/kv_connector/unit/test_mooncake_store_connector.py b/tests/v1/kv_connector/unit/test_mooncake_store_connector.py
-index 824f806f487b2c0f9c1efd018848fafd8890ce05..9f0e6f2b3d3e6ce1fd56366ff64b3ec7be4b4eb5 100644
+index 4e5d9d2e7fccf25f5ba464030607ece170f25e9a..eb5878506c16190c5284be822d2d746dc30b7137 100644
 --- a/tests/v1/kv_connector/unit/test_mooncake_store_connector.py
 +++ b/tests/v1/kv_connector/unit/test_mooncake_store_connector.py
-@@ -208,6 +208,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
+@@ -289,6 +289,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
      connector.bind_gpu_block_pool(block_pool)
      mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
  
@@ -1805,7 +1832,7 @@ index 824f806f487b2c0f9c1efd018848fafd8890ce05..9f0e6f2b3d3e6ce1fd56366ff64b3ec7
  
  def test_scheduler_reports_mooncake_cache_source():
      vllm_config = _make_vllm_config()
-@@ -253,6 +257,7 @@ def test_worker_methods_delegate_to_store_worker():
+@@ -334,6 +338,7 @@ def test_worker_methods_delegate_to_store_worker():
      worker = mock_worker_cls.return_value
      worker.get_finished.return_value = ({"req-1"}, {"req-2"})
      worker.get_block_ids_with_load_errors.return_value = {3, 4}
@@ -1813,7 +1840,7 @@ index 824f806f487b2c0f9c1efd018848fafd8890ce05..9f0e6f2b3d3e6ce1fd56366ff64b3ec7
      connector.bind_connector_metadata(metadata)
  
      connector.register_kv_caches(kv_caches)
-@@ -262,6 +267,8 @@ def test_worker_methods_delegate_to_store_worker():
+@@ -343,6 +348,8 @@ def test_worker_methods_delegate_to_store_worker():
      invalid_block_ids = connector.get_block_ids_with_load_errors()
  
      worker.register_kv_caches.assert_called_once_with(kv_caches)
@@ -1877,22 +1904,39 @@ index 6896777226cffb529c9f25560ae266760ad40f3a..060796f68078f9b331482e76020a0f2a
  def test_dsv4_five_group_eagle_store_lookup_round_trip():
      """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
  
+diff --git a/tests/v1/kv_connector/unit/test_mooncake_store_hma_e2e.py b/tests/v1/kv_connector/unit/test_mooncake_store_hma_e2e.py
+index 0682f9f465f108890c6c20ed06ab66b3e3aeb0f1..b439d1bdb298cde089b4e042b7e602c901d34480 100644
+--- a/tests/v1/kv_connector/unit/test_mooncake_store_hma_e2e.py
++++ b/tests/v1/kv_connector/unit/test_mooncake_store_hma_e2e.py
+@@ -386,7 +386,10 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
+-        thread.coord, req, [db.block_size for db in thread.token_databases]
++        thread.coord,
++        req,
++        [db.block_size for db in thread.token_databases],
++        apply_eagle=True,
+     )
+     return req
+ 
 diff --git a/tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py b/tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py
-index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81c9fe7fe9 100644
+index ec92fb910242d5f0184bed8c8580ec12b89d441b..ce59b9e5c8aa0f6e98a8644639016a40809aef46 100644
 --- a/tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py
 +++ b/tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py
-@@ -47,8 +47,10 @@ def _make_bare_scheduler(
+@@ -47,9 +47,11 @@ def _make_bare_scheduler(
      scheduler.kv_role = kv_role
      scheduler.save_decode_cache = save_decode_cache
      scheduler.enable_kv_events = False
 +    scheduler.use_lookahead_block_hashes = False
      scheduler.lookup_async = False
      scheduler.enable_lookup = True
+     scheduler._capacity_only = False
 +    scheduler.client = SimpleNamespace(discard=lambda req_id: None)
      scheduler._block_size = 16
      scheduler._hash_block_size = hash_block_size
      scheduler.enable_partial_hash_hits = enable_partial_hash_hits
-@@ -60,6 +62,7 @@ def _make_bare_scheduler(
+@@ -61,6 +63,7 @@ def _make_bare_scheduler(
      scheduler._unfinished_requests = {}
      scheduler._request_trackers = {}
      scheduler._finished_partial_tail_metas = {}
@@ -1900,7 +1944,7 @@ index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81
      scheduler._gpu_block_pool = BlockPool(
          num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
      )
-@@ -922,6 +925,34 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
+@@ -923,6 +926,34 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
      assert req_meta.boundary_puts is None
  
  
@@ -1935,7 +1979,62 @@ index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81
  class _StubLookupClient:
      def __init__(self, hit_tokens: int) -> None:
          self._hit_tokens = hit_tokens
-@@ -1332,20 +1363,23 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
+@@ -1327,26 +1358,76 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
+         boundary_puts=[BoundaryPut(1, 50, 44)],
+     )
+ 
+-    assert _partial_tail_non_mamba_puts(coord, req_meta, [16, 16]) == [
+-        BoundaryPut(0, 3, 44)
++    assert _partial_tail_non_mamba_puts(
++        coord, req_meta, [16, 16], apply_eagle=True
++    ) == [BoundaryPut(0, 3, 44)]
++
++
++@pytest.mark.parametrize(
++    "apply_eagle, mamba_tail, expected",
++    [
++        # Legacy: checkpoint 72 - 4 = 68; the 8-token proof (76) is not computed.
++        (True, 68, []),
++        # Lookahead: core keeps the checkpoint at 72 and needs no proof block.
++        (False, 72, [BoundaryPut(0, 9, 72)]),
++    ],
++)
++def test_partial_tail_follows_lookahead_checkpoint(apply_eagle, mamba_tail, expected):
++    """Lookahead hashes move the prompt checkpoint and drop the proof margin."""
++    groups = [
++        KVCacheGroupSpec(
++            ["attention"],
++            FullAttentionSpec(
++                block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32
++            ),
++            is_eagle_group=True,
++        ),
++        KVCacheGroupSpec(
++            ["mamba"],
++            MambaSpec(
++                block_size=16,
++                shapes=((1,),),
++                dtypes=(torch.float32,),
++                mamba_cache_mode="align",
++            ),
++        ),
+     ]
++    coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle=True)
++    req_meta = ReqMeta(
++        req_id="req-0",
++        token_len_chunk=0,
++        block_ids=(list(range(1, 11)), [50, 51, 52, 53, 54]),
++        block_hashes=[bytes([i]) for i in range(18)],
++        num_prompt_tokens=75,
++        completed_token_len=75,
++        boundary_puts=[BoundaryPut(1, 60, mamba_tail)],
++        publish_partial_tail=True,
++    )
++
++    assert (
++        _partial_tail_non_mamba_puts(coord, req_meta, [8, 16], apply_eagle=apply_eagle)
++        == expected
++    )
  
  
  @pytest.mark.parametrize(
@@ -1964,7 +2063,7 @@ index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81
  ):
      """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
      Mamba state at the shared-prefix junction, below the prompt checkpoint."""
-@@ -1382,7 +1416,12 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
+@@ -1383,7 +1464,12 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
          publish_partial_tail=publish,
      )
  
@@ -1978,7 +2077,7 @@ index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81
  
  
  def test_decode_boundary_state_offload_dropped_unclaimed():
-@@ -1764,3 +1803,98 @@ def test_worker_metadata_aggregates_completions_across_ranks():
+@@ -1765,3 +1851,98 @@ def test_worker_metadata_aggregates_completions_across_ranks():
          MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
      )
      assert merged.completed_saves == {1: 2, 2: 1}
@@ -2078,10 +2177,22 @@ index 47796eb14707a3031d67222ebccccdb2cb9ed80d..8b2b57c9beea6f2978b1978762f9ad81
 +    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
 +    assert pool.blocks[1].ref_cnt == pool.blocks[2].ref_cnt == 0
 diff --git a/tests/v1/kv_connector/unit/test_mooncake_store_worker.py b/tests/v1/kv_connector/unit/test_mooncake_store_worker.py
-index 09d27eb947a052604215b78bb0835e80dac86712..c7e8e745f4a4c4a59b0df4e868b2e92ce70878ba 100644
+index 09d27eb947a052604215b78bb0835e80dac86712..13ae1341c07feec1bff7eab3e204dd8aabf22903 100644
 --- a/tests/v1/kv_connector/unit/test_mooncake_store_worker.py
 +++ b/tests/v1/kv_connector/unit/test_mooncake_store_worker.py
-@@ -1589,7 +1589,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
+@@ -950,7 +950,10 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
+-        thread.coord, req, [db.block_size for db in thread.token_databases]
++        thread.coord,
++        req,
++        [db.block_size for db in thread.token_databases],
++        apply_eagle=True,
+     )
+     return req
+ 
+@@ -1589,7 +1592,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
      )
      coord = SimpleNamespace(
          lcm_block_size=16,
@@ -2090,7 +2201,7 @@ index 09d27eb947a052604215b78bb0835e80dac86712..c7e8e745f4a4c4a59b0df4e868b2e92c
              None,
              [True, False],
          ),
-@@ -1635,7 +1635,9 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
+@@ -1635,7 +1638,9 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
  
      assert full_hashes == [b"a2".hex(), b"a3".hex()]
      assert masked_hashes == [b"a2".hex()]
@@ -2101,7 +2212,7 @@ index 09d27eb947a052604215b78bb0835e80dac86712..c7e8e745f4a4c4a59b0df4e868b2e92c
  
  
  def test_store_sending_thread_prepares_missing_chunks_once_per_group():
-@@ -1644,7 +1646,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
+@@ -1644,7 +1649,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
      store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
      coord = SimpleNamespace(
          lcm_block_size=16,
@@ -2110,7 +2221,7 @@ index 09d27eb947a052604215b78bb0835e80dac86712..c7e8e745f4a4c4a59b0df4e868b2e92c
              None,
              None,
          ),
-@@ -3711,6 +3713,7 @@ def _make_bare_worker(
+@@ -3711,6 +3716,7 @@ def _make_bare_worker(
      worker.kv_role = kv_role
      worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
      worker._capacity_only = False
@@ -2285,10 +2396,10 @@ index 4ac3eaf7c5698d802cdaa09bb659f50868ea52f4..29038a35c0e22e1717f357d51a9841fd
      class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
          def __init__(self, data: set[str]):
 diff --git a/tests/v1/kv_connector/unit/test_nixl_connector_hma.py b/tests/v1/kv_connector/unit/test_nixl_connector_hma.py
-index 469e0f5d8294092766d4257148652a076bc2473e..ffa9e807586d80cd4ed48972840e70762af60014 100644
+index e431beba691ea82ec5bf385a41f93655e511e674..0407b2e6d5241b05c96cf5a43350f43cdf3d6e21 100644
 --- a/tests/v1/kv_connector/unit/test_nixl_connector_hma.py
 +++ b/tests/v1/kv_connector/unit/test_nixl_connector_hma.py
-@@ -1558,6 +1558,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
+@@ -1559,6 +1559,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
  
      scheduler = object.__new__(Scheduler)
      scheduler.connector = MagicMock()
@@ -2341,13 +2452,13 @@ index 1f97d8a1c0a248fec7c6a22dbec8cf852557aca6..a1a6e6984a18d5b57d889775ce90cedd
          """Comprehensive integration test covering complete streaming request lifecycle
          including scheduler state management and aliasing bug prevention.
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index 48c1c04edc8ce6f83be2f884a0606450d8553b08..29cd233f076674f12329571bc62e270c7093fa68 100644
+index 001e94d8b663ea0ea058be0a04ee33ee559ec096..6b51aa86f65c6947f11e308c27f84d836ae8342a 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -460,6 +460,11 @@ class SpeculativeConfig:
-     platform's FP8 linear kernel; "nvfp4" is weight-only on the Marlin kernel.
-     The target verifies with its own head, so only the acceptance length can
-     change. Model Runner V2 only."""
+     platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
+     W4A16 kernel. The target verifies with its own head, so only the
+     acceptance length can change. Model Runner V2 only."""
 +    disable_lookahead_block_hashes: bool = False
 +    """Disable lookahead block hashes for EAGLE-like speculative methods and
 +    fall back to dropping the trailing prefix-cache block. Lookahead hashes
@@ -2357,20 +2468,18 @@ index 48c1c04edc8ce6f83be2f884a0606450d8553b08..29cd233f076674f12329571bc62e270c
      """Use vocab-parallel local argmax instead of all-gathering full logits
      for draft token generation. Reduces communication from O(vocab_size) to
 diff --git a/vllm/distributed/kv_transfer/kv_connector/factory.py b/vllm/distributed/kv_transfer/kv_connector/factory.py
-index 97064e06cdb8497dcb2a103e34939dcb8dd6fd59..7f7bd7c84bcf5cf0947ed15f1ef2132e91270faa 100644
+index 97064e06cdb8497dcb2a103e34939dcb8dd6fd59..edb1fac7e9cff31df3d10d92ec244c5255de5fa4 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/factory.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/factory.py
-@@ -14,6 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
-     KVConnectorRole,
-     supports_hma,
+@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
  )
-+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-+    is_lookahead_block_hashing_enabled,
-+)
  from vllm.logger import init_logger
  from vllm.utils.func_utils import supports_kw
++from vllm.v1.core.kv_cache_utils import is_lookahead_block_hashing_enabled
  
-@@ -72,7 +75,11 @@ class KVConnectorFactory:
+ if TYPE_CHECKING:
+     from vllm.config import VllmConfig
+@@ -72,7 +73,11 @@ class KVConnectorFactory:
          # - Co-locate with worker process
          # - Should only be used inside the forward context & attention layer
          # We build separately to enforce strict separation
@@ -2384,10 +2493,10 @@ index 97064e06cdb8497dcb2a103e34939dcb8dd6fd59..7f7bd7c84bcf5cf0947ed15f1ef2132e
      @classmethod
      def get_connector_class_by_name(
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
-index 71593f59e55ccd6beaf85e230dafc3be29d40f48..32e40cd4a121c03a53c4b9158e593d1a74adcad3 100644
+index 8997571407d5c327fb9e35d709c2e43a1942f537..42435ef0d0f609d3c0b859030654b707018d4317 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
-@@ -114,7 +114,12 @@ class SupportsHMA(ABC):
+@@ -115,7 +115,12 @@ class SupportsHMA(ABC):
  
          NOTE(Kuntai): This function is only supported by connectors that support HMA.
  
@@ -2401,7 +2510,7 @@ index 71593f59e55ccd6beaf85e230dafc3be29d40f48..32e40cd4a121c03a53c4b9158e593d1a
          asynchronously by returning True.
  
          Returns:
-@@ -193,6 +198,17 @@ class KVConnectorBase_V1(ABC):
+@@ -194,6 +199,17 @@ class KVConnectorBase_V1(ABC):
          """
          return False
  
@@ -2419,7 +2528,7 @@ index 71593f59e55ccd6beaf85e230dafc3be29d40f48..32e40cd4a121c03a53c4b9158e593d1a
      @property
      def requires_kv_delivery(self) -> bool:
          """Whether this connector hands off KV that must be reliably delivered.
-@@ -224,6 +240,11 @@ class KVConnectorBase_V1(ABC):
+@@ -230,6 +246,11 @@ class KVConnectorBase_V1(ABC):
          self._kv_cache_config = kv_cache_config
          self._kv_cache_manager: KVCacheManager | None = None
          self._role = role
@@ -2431,7 +2540,7 @@ index 71593f59e55ccd6beaf85e230dafc3be29d40f48..32e40cd4a121c03a53c4b9158e593d1a
  
      @property
      def role(self) -> KVConnectorRole:
-@@ -621,7 +642,12 @@ class KVConnectorBase_V1(ABC):
+@@ -636,7 +657,12 @@ class KVConnectorBase_V1(ABC):
          """Called exactly once when a request has finished, before its blocks are
          freed.
  
@@ -2446,10 +2555,10 @@ index 71593f59e55ccd6beaf85e230dafc3be29d40f48..32e40cd4a121c03a53c4b9158e593d1a
  
          Returns:
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py
-index 41c1337ecd8505437152b7dffb2e3696eac32cbf..1125acd94b6783674cf985d3212bfeb0ec11b655 100644
+index bc70d7cba8a8a7d2b6172904c896c1ac2511f5b1..1568083679a8716c19fd405f02e9fa1207930a5c 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py
-@@ -703,6 +703,11 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
+@@ -704,6 +704,11 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
  class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
      _cache_hit_source = CacheHitSource.P2P
  
@@ -2462,12 +2571,12 @@ index 41c1337ecd8505437152b7dffb2e3696eac32cbf..1125acd94b6783674cf985d3212bfeb0
          self,
          vllm_config: VllmConfig,
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py
-index dd64dd671e298eeb0ed2bdec5a9037899cb35a15..4162f906a077d2dd0cb184126ad3e27ccdce2204 100644
+index a1e28b97d06a59367959a0c6d46aeabd116a3f2b..b83fc1c9b9a6e66b275c286ae04dffa6da85264a 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py
-@@ -127,6 +127,10 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
- class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
-     """KV connector using MooncakeDistributedStore as shared KV pool."""
+@@ -131,6 +131,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
+     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+         return False
  
 +    @property
 +    def supports_lookahead_block_hashes(self) -> bool:
@@ -2476,7 +2585,7 @@ index dd64dd671e298eeb0ed2bdec5a9037899cb35a15..4162f906a077d2dd0cb184126ad3e27c
      @staticmethod
      def _validate_kv_cache_config(
          vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-@@ -194,6 +198,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
+@@ -198,6 +202,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
          else:
              self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
  
@@ -2490,7 +2599,7 @@ index dd64dd671e298eeb0ed2bdec5a9037899cb35a15..4162f906a077d2dd0cb184126ad3e27c
      def shutdown(self):
          """Release connector resources on teardown.
  
-@@ -267,6 +278,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
+@@ -271,6 +282,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
      ) -> tuple[bool, dict[str, Any] | None]:
          # An in-flight store job holds its own reference on the blocks it reads,
          # so a finishing request never has to defer freeing them.
@@ -2597,7 +2706,7 @@ index 4cd0402b7b4f2d93f274c391d77291b76b141392..546eb5f7d2a0b0d45abe9e0c05c4d9b7
          publish_tail = (
              save_partial_tail
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py
-index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d30e7fd67c 100644
+index 18d961abb28614ec8c9798b987bae4b6043497e1..7a09f55b5596e41c9b406c57f8dd48cdf4d638d5 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py
 @@ -30,9 +30,7 @@ from vllm.utils.math_utils import cdiv
@@ -2616,32 +2725,43 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
      req_meta: ReqMeta,
      block_sizes: Sequence[int],
 +    *,
-+    apply_eagle: bool = True,
++    apply_eagle: bool,
  ) -> list[BoundaryPut]:
      """Locate the non-Mamba blocks a partial-tail save publishes.
  
-@@ -102,7 +102,7 @@ def _partial_tail_non_mamba_puts(
+@@ -83,7 +83,8 @@ def _partial_tail_non_mamba_puts(
+     junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+ 
+     ``block_sizes`` are the per-group block sizes, indexed like
+-    ``req_meta.block_ids``.
++    ``req_meta.block_ids``. ``apply_eagle`` is False under lookahead block
++    hashes, where the core neither backs off the checkpoint nor needs a proof.
+     """
+     mamba_tails = [
+         put.num_tokens
+@@ -101,8 +102,9 @@ def _partial_tail_non_mamba_puts(
+     hash_block_size = coord.hash_block_size
      # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
      # groups carry the eagle flag.
++    drop_eagle_block = apply_eagle and coord.use_eagle
      boundary = get_mamba_prefill_checkpoint_position(
 -        prompt_tokens, hash_block_size, coord.use_eagle
-+        prompt_tokens, hash_block_size, apply_eagle and coord.use_eagle
++        prompt_tokens, hash_block_size, drop_eagle_block
      )
      # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
      # attention KV, EAGLE proof included, ends on an attention block end no later
-@@ -117,7 +117,10 @@ def _partial_tail_non_mamba_puts(
+@@ -117,7 +119,9 @@ def _partial_tail_non_mamba_puts(
      for group_id, block_size in enumerate(block_sizes):
          if group_id in coord.mamba_group_ids:
              continue
 -        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
-+        proof_margin = (
-+            coord.eagle_proof_margin_by_group.get(group_id, 0) if apply_eagle else 0
-+        )
-+        proof_end = boundary + proof_margin
++        proof_end = boundary
++        if drop_eagle_block:
++            proof_end += coord.eagle_proof_margin_by_group.get(group_id, 0)
          if proof_end > completed or proof_end // hash_block_size > num_hashes:
              continue
          group_blocks = req_meta.block_ids[group_id]
-@@ -153,6 +156,7 @@ class MooncakeStoreScheduler:
+@@ -153,6 +157,7 @@ class MooncakeStoreScheduler:
              kv_event_config and kv_event_config.enable_kv_cache_events
          )
          self.client = LookupKeyClient(vllm_config)
@@ -2649,7 +2769,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
          self.kv_cache_config = kv_cache_config
          self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
          # Map scheduler group IDs to store group indices. Groups outside the
-@@ -194,10 +198,26 @@ class MooncakeStoreScheduler:
+@@ -203,10 +208,26 @@ class MooncakeStoreScheduler:
          self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
          self._unfinished_request_ids: set[str] = set()
          self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
@@ -2676,7 +2796,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
      def get_num_new_matched_tokens(
          self,
          request: Request,
-@@ -317,7 +337,6 @@ class MooncakeStoreScheduler:
+@@ -326,7 +347,6 @@ class MooncakeStoreScheduler:
              self._unfinished_request_ids,
              preempted_ids,
          )
@@ -2684,7 +2804,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
          # Handle new requests
          for request in scheduler_output.scheduled_new_reqs:
              load_spec = self.load_specs.pop(request.req_id, None)
-@@ -358,6 +377,7 @@ class MooncakeStoreScheduler:
+@@ -367,6 +387,7 @@ class MooncakeStoreScheduler:
                  block_hashes=request_real.block_hashes,
                  num_prompt_tokens=request_real.num_prompt_tokens,
                  save_partial_tail=self.enable_partial_hash_hits,
@@ -2692,7 +2812,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
              )
              if req_meta is not None:
                  meta.add_request(req_meta)
-@@ -366,6 +386,9 @@ class MooncakeStoreScheduler:
+@@ -375,6 +396,9 @@ class MooncakeStoreScheduler:
          cached_reqs = scheduler_output.scheduled_cached_reqs
          if can_process_cached:
              for i, req_id in enumerate(cached_reqs.req_ids):
@@ -2702,7 +2822,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
                  new_block_ids = cached_reqs.new_block_ids[i]
                  if new_block_ids:
                      new_block_ids = tuple(
-@@ -379,8 +402,7 @@ class MooncakeStoreScheduler:
+@@ -388,8 +412,7 @@ class MooncakeStoreScheduler:
                          continue
                      new_block_ids = tuple(b.copy() for b in new_block_ids)
                      load_spec = self.load_specs.pop(req_id, None)
@@ -2712,7 +2832,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
                      num_tokens_to_compute = (
                          request_real.num_computed_tokens
                          + scheduler_output.num_scheduled_tokens[req_id]
-@@ -410,6 +432,10 @@ class MooncakeStoreScheduler:
+@@ -419,6 +442,10 @@ class MooncakeStoreScheduler:
                          block_hashes=request_real.block_hashes,
                          num_prompt_tokens=request_real.num_prompt_tokens,
                          save_partial_tail=self.enable_partial_hash_hits,
@@ -2723,7 +2843,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
                      )
                  else:
                      # Decode/chunked request
-@@ -423,20 +449,14 @@ class MooncakeStoreScheduler:
+@@ -432,20 +459,14 @@ class MooncakeStoreScheduler:
                          continue
  
                      num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -2752,7 +2872,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
                      # A block is usually allocated before the step that fills
                      # it, so reaching a save boundary does not imply that this
                      # step has new block ids.
-@@ -453,6 +473,7 @@ class MooncakeStoreScheduler:
+@@ -462,6 +483,7 @@ class MooncakeStoreScheduler:
                          block_hashes=unfinished_req.block_hashes,
                          num_prompt_tokens=unfinished_req.num_prompt_tokens,
                          save_partial_tail=self.enable_partial_hash_hits,
@@ -2760,7 +2880,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
                      )
  
                  if req_meta is not None:
-@@ -510,6 +531,9 @@ class MooncakeStoreScheduler:
+@@ -519,6 +541,9 @@ class MooncakeStoreScheduler:
          for req_meta in self._finished_partial_tail_metas.values():
              meta.add_request(req_meta)
          self._finished_partial_tail_metas.clear()
@@ -2768,9 +2888,9 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
 +            meta.add_request(req_meta)
 +        self._finished_lookahead_save_metas.clear()
  
-         self._reference_save_blocks(meta)
-         return meta
-@@ -538,53 +562,92 @@ class MooncakeStoreScheduler:
+         if not self._capacity_only:
+             self._reference_save_blocks(meta)
+@@ -548,54 +573,92 @@ class MooncakeStoreScheduler:
              )
  
      def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
@@ -2782,6 +2902,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
 -        """
 -        pool = self._gpu_block_pool
 -        coord = self._store_coord
+-        assert coord is not None
 -        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
 +        """Pin each save job until every worker has finished reading its blocks."""
          for req_meta in meta.requests:
@@ -2903,7 +3024,7 @@ index 239dad736490e065dcf0d8f6d4081f67c635277f..88f93d1ba164ee94acf526c6f45cc1d3
  
      def register_finished_partial_tail(
          self,
-@@ -634,6 +697,7 @@ class MooncakeStoreScheduler:
+@@ -646,6 +709,7 @@ class MooncakeStoreScheduler:
                  coord,
                  req_meta,
                  [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
@@ -2992,7 +3113,7 @@ index 004b69286ea328319e58c8ad9e0521412adc10da..a65941ee346a0200562f8b35af697639
          return MooncakeLookupResult(
              hit_length,
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
-index 1ded62adda1a0c6c489020d1412a10c133551736..79c761c4d2d612a297bf06bb279bc645f87ba5de 100644
+index bc59f3cb276f867d5ef211413cb4e951efa5f8c9..4d8f5ecc2bc10025bd6e382b8b64217642ba0606 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
 @@ -218,6 +218,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
@@ -3014,7 +3135,7 @@ index 1ded62adda1a0c6c489020d1412a10c133551736..79c761c4d2d612a297bf06bb279bc645
      def requires_kv_delivery(self) -> bool:
          return any(c.requires_kv_delivery for c in self._connectors)
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
-index 6e43356c0d7bc9955578fbb97dd9e9c0558c406c..f806dae7d1186fbaaa507d03c26aebf6cb85345f 100644
+index 5511edc580386170755f93be0694a994e17a9bb0..71239e0d01cff1df1dc3709f283992307626aebd 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
 @@ -80,6 +80,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
@@ -3031,7 +3152,7 @@ index 6e43356c0d7bc9955578fbb97dd9e9c0558c406c..f806dae7d1186fbaaa507d03c26aebf6
      def supports_divergent_local_hybrid_hits(self) -> bool:
          return True
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad96629812 100644
+index bebb71f11d33197c6c12fc50d52f3342b97dc905..b225bff29b9ef2f48b785ef7bce5e2f6d13a7bdc 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
 @@ -101,9 +101,8 @@ class GroupOffloadConfig(NamedTuple):
@@ -3117,15 +3238,15 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
              )
  
      def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
-@@ -574,6 +584,7 @@ class OffloadingConnectorScheduler:
-         )
-         self.manager: OffloadingManager = spec.get_manager()
-         self._connector_stats = OffloadingConnectorStats()
+@@ -569,6 +579,7 @@ class OffloadingConnectorScheduler:
+         vllm_config: VllmConfig,
+         kv_cache_config: KVCacheConfig,
+     ):
 +        self.use_lookahead_block_hashes = False
- 
-         full_attention_groups: list[int] = []
-         sliding_window_groups: list[int] = []
-@@ -664,6 +675,12 @@ class OffloadingConnectorScheduler:
+         self.config = SchedulerOffloadConfig.from_spec(
+             spec, vllm_config, kv_cache_config
+         )
+@@ -668,6 +679,12 @@ class OffloadingConnectorScheduler:
          self, req_status: RequestOffloadState, num_computed_tokens: int
      ) -> int:
          num = min(num_computed_tokens, req_status.req.num_tokens)
@@ -3138,7 +3259,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
          max_offload_tokens = req_status.max_offload_tokens
          if max_offload_tokens is not None:
              num = min(num, max_offload_tokens)
-@@ -787,9 +804,8 @@ class OffloadingConnectorScheduler:
+@@ -791,9 +808,8 @@ class OffloadingConnectorScheduler:
          defer_lookup = False
          lookup_groups = self._lookup_groups
  
@@ -3150,7 +3271,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
          eagle_verified: set[int] = set()
          while lookup_groups:
              looked_up_sliding_window: bool = False
-@@ -803,12 +819,17 @@ class OffloadingConnectorScheduler:
+@@ -807,12 +823,17 @@ class OffloadingConnectorScheduler:
                  tokens_per_chunk = group_config.tokens_per_chunk
                  offload_keys = group_state.offload_keys
  
@@ -3171,7 +3292,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
                  )
  
                  # Constrain to a chunk-aligned boundary for this group.
-@@ -827,9 +848,9 @@ class OffloadingConnectorScheduler:
+@@ -831,9 +852,9 @@ class OffloadingConnectorScheduler:
                      group_config.sliding_window_size_in_chunks
                  )
  
@@ -3184,7 +3305,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
                  # which can push the confirmed boundary under a coarser
                  # sibling group's chunk granularity and zero the whole
                  # request's hit (issue #52735).
-@@ -894,7 +915,7 @@ class OffloadingConnectorScheduler:
+@@ -898,7 +919,7 @@ class OffloadingConnectorScheduler:
                      return 0
  
                  if new_num_hit_tokens < num_hit_tokens:
@@ -3193,7 +3314,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
                          eagle_verified.clear()
                      if defer_lookup:
                          # make another iteration on all groups to check
-@@ -1542,7 +1563,9 @@ class OffloadingConnectorScheduler:
+@@ -1550,7 +1571,9 @@ class OffloadingConnectorScheduler:
              end_block=end_chunk_idx * blocks_per_chunk,
              alignment_tokens=self.config.alignment_tokens,
              kv_cache_spec=kv_cache_spec,
@@ -3204,7 +3325,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
              retention_interval=self.config.retention_interval,
              reachable_boundaries=reachable_boundaries,
              dcp_world_size=self.config.dcp_world_size,
-@@ -1572,6 +1595,7 @@ class OffloadingConnectorScheduler:
+@@ -1580,6 +1603,7 @@ class OffloadingConnectorScheduler:
          scheduler_output: SchedulerOutput,
      ) -> dict[int, TransferJob]:
          blocks_per_chunk = self.config.blocks_per_chunk
@@ -3212,7 +3333,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
          store_jobs: dict[int, TransferJob] = {}
          for req_id in chain(
              scheduler_output.num_scheduled_tokens,
-@@ -1615,7 +1639,10 @@ class OffloadingConnectorScheduler:
+@@ -1623,7 +1647,10 @@ class OffloadingConnectorScheduler:
                  self.config.kv_group_configs, req_status.group_states
              ):
                  num_chunks = req_status.storable_chunks(
@@ -3224,7 +3345,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
                  )
  
                  start_chunk_idx = group_state.next_stored_chunk_idx
-@@ -1726,7 +1753,7 @@ class OffloadingConnectorScheduler:
+@@ -1734,7 +1761,7 @@ class OffloadingConnectorScheduler:
                      new_offload_keys.append(offload_key)
  
              if not new_offload_keys:
@@ -3233,7 +3354,7 @@ index 806267dcf3dd731aca8490478a6e4dd86854ea9d..2ddacbd20d23c0ad25d643c07163fdad
                  continue
  
              store_output = self.manager.prepare_store(
-@@ -1740,7 +1767,7 @@ class OffloadingConnectorScheduler:
+@@ -1748,7 +1775,7 @@ class OffloadingConnectorScheduler:
                  continue
  
              if not store_output.keys_to_store:
@@ -3262,60 +3383,24 @@ index af3e113b5f09c5e2529ceda65187357cc91e3d05..71675a08903f49198063c89261542306
      @property
      def requires_kv_delivery(self) -> bool:
          # Runs as kv_both, but is a best-effort cache: a dropped save is just a
-diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/prefix_cache.py b/vllm/distributed/kv_transfer/kv_connector/v1/prefix_cache.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..a65bbccd8e5a2f3e2fea84db91d349ce0b443403
---- /dev/null
-+++ b/vllm/distributed/kv_transfer/kv_connector/v1/prefix_cache.py
-@@ -0,0 +1,32 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+"""Prefix-cache protocol selection for EAGLE engines."""
-+
-+from typing import TYPE_CHECKING
-+
-+if TYPE_CHECKING:
-+    from vllm.config import VllmConfig
-+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-+        KVConnectorBase_V1,
-+    )
-+
-+
-+def is_lookahead_block_hashing_enabled(
-+    vllm_config: "VllmConfig",
-+    kv_connector: "KVConnectorBase_V1 | None" = None,
-+) -> bool:
-+    speculative_config = vllm_config.speculative_config
-+    if (
-+        speculative_config is None
-+        or not speculative_config.use_eagle_block_drop()
-+        or speculative_config.disable_lookahead_block_hashes
-+    ):
-+        return False
-+    # The hash covers only the next token; multi-module MTP reads further ahead.
-+    if vllm_config.num_prefill_lookahead_tokens > 1:
-+        return False
-+    if vllm_config.kv_transfer_config is not None:
-+        return bool(
-+            kv_connector is not None and kv_connector.supports_lookahead_block_hashes
-+        )
-+    return vllm_config.cache_config.enable_prefix_caching
 diff --git a/vllm/model_executor/layers/mamba/checkpoint.py b/vllm/model_executor/layers/mamba/checkpoint.py
-index 2f3122f87058e5b501405f01ca5de2d16c10176a..aac15c0fbf896794fc740d4fcc20dcff4df8de6e 100644
+index 57635a7005e3f4f5f9d3021a6c75dd123130f72d..9b86a7b9939f9b66ce51f3a882a7e8547467b570 100644
 --- a/vllm/model_executor/layers/mamba/checkpoint.py
 +++ b/vllm/model_executor/layers/mamba/checkpoint.py
-@@ -7,6 +7,10 @@ from dataclasses import dataclass, replace
- import torch
+@@ -7,10 +7,12 @@ import torch
  
  from vllm.config import VllmConfig
+ from vllm.triton_utils import tl, triton
 +from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-+    is_lookahead_block_hashing_enabled,
-+)
  from vllm.utils.math_utils import cdiv
  from vllm.utils.torch_utils import async_tensor_h2d
  from vllm.v1.attention.backend import CommonAttentionMetadata
-@@ -97,6 +101,17 @@ class MambaPrefillCheckpointBuilder:
+ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
++from vllm.v1.core.kv_cache_utils import is_lookahead_block_hashing_enabled
+ from vllm.v1.kv_cache_interface import (
+     MambaSpec,
+     get_mamba_prefill_checkpoint_position,
+@@ -99,6 +101,17 @@ class MambaPrefillCheckpointBuilder:
      def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
          self.vllm_config = vllm_config
          self.kv_cache_spec = kv_cache_spec
@@ -3333,7 +3418,7 @@ index 2f3122f87058e5b501405f01ca5de2d16c10176a..aac15c0fbf896794fc740d4fcc20dcff
  
      def build(
          self,
-@@ -118,17 +133,13 @@ class MambaPrefillCheckpointBuilder:
+@@ -120,17 +133,13 @@ class MambaPrefillCheckpointBuilder:
          query_lens = [all_query_lens[row] for row in request_rows]
          seq_lens = m.seq_lens_cpu_upper_bound.tolist()
          block_size = self.kv_cache_spec.block_size
@@ -3456,7 +3541,7 @@ index 3b0102fe84aa005a708d04b1c77380132ab80904..d41f1f5f1247c5beced5d7f902ffcba3
                      session_id=request.session_id,
                  )
 diff --git a/vllm/v1/core/kv_cache_coordinator.py b/vllm/v1/core/kv_cache_coordinator.py
-index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0b60ddb27 100644
+index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..2eef87d3b64bc774845262d1e835b09c9f1d76f7 100644
 --- a/vllm/v1/core/kv_cache_coordinator.py
 +++ b/vllm/v1/core/kv_cache_coordinator.py
 @@ -105,6 +105,7 @@ class KVCacheCoordinator(ABC):
@@ -3475,27 +3560,16 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
          )
  
          # KV cache group indices that get the EAGLE last-block drop.
-@@ -131,6 +133,10 @@ class KVCacheCoordinator(ABC):
+@@ -131,6 +133,8 @@ class KVCacheCoordinator(ABC):
          # Conservatively fall back to flag all groups when no group is flagged.
          if use_eagle and not self.eagle_group_ids:
              self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
-+        # Lookahead hashes prove the boundary token, so no group drops a block.
-+        self.drop_eagle_group_ids = (
-+            set() if use_lookahead_block_hashes else self.eagle_group_ids
-+        )
++        # Lookahead hashes clear ``use_eagle``: groups stay flagged, none drops.
++        self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
  
          # During chunked prefill with EAGLE, the single next prefill lookahead
          # token past the chunk boundary is combined with the final hidden state
-@@ -171,7 +177,7 @@ class KVCacheCoordinator(ABC):
-             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
-         )
-         # Match Mamba checkpoints to Eagle's attention replay boundary.
--        if use_eagle:
-+        if use_eagle and not use_lookahead_block_hashes:
-             for manager in self.single_type_managers:
-                 if isinstance(manager, MambaManager):
-                     manager.drop_eagle_checkpoint_block = True
-@@ -364,7 +370,7 @@ class KVCacheCoordinator(ABC):
+@@ -364,7 +368,7 @@ class KVCacheCoordinator(ABC):
          boundaries = replay_boundaries(
              request.num_prompt_tokens,
              self.scheduler_block_size,
@@ -3504,7 +3578,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
          )
          for group_id, manager in enumerate(self.single_type_managers):
              if not manager.enable_caching:
-@@ -492,6 +498,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
+@@ -492,6 +496,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
          scheduler_block_size: int,
          hash_block_size: int,
          metrics_collector: KVCacheMetricsCollector | None = None,
@@ -3512,7 +3586,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
          num_prefill_lookahead: int = 0,
      ):
          super().__init__(
-@@ -506,6 +513,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
+@@ -506,6 +511,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
              scheduler_block_size=scheduler_block_size,
              hash_block_size=hash_block_size,
              metrics_collector=metrics_collector,
@@ -3520,7 +3594,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              num_prefill_lookahead=num_prefill_lookahead,
          )
          self.num_single_type_manager = len(self.single_type_managers)
-@@ -540,6 +548,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
+@@ -540,6 +546,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
          scheduler_block_size: int,
          hash_block_size: int,
          metrics_collector: KVCacheMetricsCollector | None = None,
@@ -3528,7 +3602,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
          num_prefill_lookahead: int = 0,
      ):
          super().__init__(
-@@ -554,6 +563,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
+@@ -554,6 +561,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
              scheduler_block_size=scheduler_block_size,
              hash_block_size=hash_block_size,
              metrics_collector=metrics_collector,
@@ -3536,7 +3610,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              num_prefill_lookahead=num_prefill_lookahead,
          )
          self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-@@ -569,7 +579,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
+@@ -569,7 +577,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
              "UnitaryKVCacheCoordinator assumes only one kv cache group"
          )
          # Single group; useless but just set ``use_eagle`` for consistency regardless.
@@ -3545,7 +3619,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
  
      def find_longest_cache_hit(
          self,
-@@ -582,7 +592,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
+@@ -582,7 +590,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
              kv_cache_group_ids=[0],
              block_pool=self.block_pool,
              kv_cache_spec=self.kv_cache_spec,
@@ -3554,7 +3628,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              alignment_tokens=self.block_size,
              dcp_world_size=self.dcp_world_size,
              pcp_world_size=self.pcp_world_size,
-@@ -624,6 +634,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+@@ -624,6 +632,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
          scheduler_block_size: int,
          hash_block_size: int,
          metrics_collector: KVCacheMetricsCollector | None = None,
@@ -3562,7 +3636,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
          num_prefill_lookahead: int = 0,
          allow_partial_hash_hits: bool = True,
      ):
-@@ -639,6 +650,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+@@ -639,6 +648,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
              scheduler_block_size=scheduler_block_size,
              hash_block_size=hash_block_size,
              metrics_collector=metrics_collector,
@@ -3570,7 +3644,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              num_prefill_lookahead=num_prefill_lookahead,
          )
          # hash_block_size: the block size used to compute block hashes.
-@@ -720,7 +732,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+@@ -720,7 +730,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                  continue
              manager_cls = self.single_type_managers[i].__class__
              spec = g.kv_cache_spec
@@ -3579,7 +3653,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
  
              # Try to find an existing group with the same spec
              for idx, group in enumerate(self.attention_groups):
-@@ -989,6 +1001,7 @@ def get_kv_cache_coordinator(
+@@ -989,6 +999,7 @@ def get_kv_cache_coordinator(
      scheduler_block_size: int,
      hash_block_size: int,
      metrics_collector: KVCacheMetricsCollector | None = None,
@@ -3587,7 +3661,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
      num_prefill_lookahead: int = 0,
      allow_partial_hash_hits: bool = True,
  ) -> KVCacheCoordinator:
-@@ -1004,6 +1017,7 @@ def get_kv_cache_coordinator(
+@@ -1004,6 +1015,7 @@ def get_kv_cache_coordinator(
              scheduler_block_size=scheduler_block_size,
              hash_block_size=hash_block_size,
              metrics_collector=metrics_collector,
@@ -3595,7 +3669,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              num_prefill_lookahead=num_prefill_lookahead,
          )
      if len(kv_cache_config.kv_cache_groups) == 1:
-@@ -1019,6 +1033,7 @@ def get_kv_cache_coordinator(
+@@ -1019,6 +1031,7 @@ def get_kv_cache_coordinator(
              scheduler_block_size=scheduler_block_size,
              hash_block_size=hash_block_size,
              metrics_collector=metrics_collector,
@@ -3603,7 +3677,7 @@ index 7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18..ea2631ef6a513cf16689ceb3f9ddacc0
              num_prefill_lookahead=num_prefill_lookahead,
          )
      return HybridKVCacheCoordinator(
-@@ -1033,6 +1048,7 @@ def get_kv_cache_coordinator(
+@@ -1033,6 +1046,7 @@ def get_kv_cache_coordinator(
          scheduler_block_size=scheduler_block_size,
          hash_block_size=hash_block_size,
          metrics_collector=metrics_collector,
@@ -3632,10 +3706,18 @@ index 4f472170a874814b539ae900d014efecc7327150..0f29533d8175cb5b544141e26463edb4
              enable_kv_cache_events=enable_kv_cache_events,
              dcp_world_size=dcp_world_size,
 diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
-index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62c6f87be8 100644
+index 5c51a8d131ff97d9c289e952987da31f3a43243d..8042984b919b4f3009f039ccd1856676d30f028f 100644
 --- a/vllm/v1/core/kv_cache_utils.py
 +++ b/vllm/v1/core/kv_cache_utils.py
-@@ -661,13 +661,33 @@ def to_event_extra_keys(
+@@ -29,6 +29,7 @@ from vllm.v1.request import Request
+ from vllm.v1.utils import tensor_data
+ 
+ if TYPE_CHECKING:
++    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+     from vllm.v1.core.block_pool import BlockPool
+     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+ 
+@@ -661,13 +662,33 @@ def to_event_extra_keys(
      """
      if not extra_keys:
          return None
@@ -3673,7 +3755,34 @@ index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62
  
  
  def hash_block_tokens(
-@@ -919,6 +939,7 @@ def resolve_cache_hit_alignment_tokens(
+@@ -916,9 +937,34 @@ def resolve_cache_hit_alignment_tokens(
+     return scheduler_block_size
+ 
+ 
++def is_lookahead_block_hashing_enabled(
++    vllm_config: VllmConfig,
++    kv_connector: "KVConnectorBase_V1 | None" = None,
++) -> bool:
++    speculative_config = vllm_config.speculative_config
++    if (
++        speculative_config is None
++        or not speculative_config.use_eagle_block_drop()
++        or speculative_config.disable_lookahead_block_hashes
++    ):
++        return False
++    # The hash covers only the next token; multi-module MTP reads further ahead.
++    if vllm_config.num_prefill_lookahead_tokens > 1:
++        return False
++    # HiSparse is not validated with lookahead hashes.
++    if vllm_config.attention_config.hisparse_config is not None:
++        return False
++    if vllm_config.kv_transfer_config is not None:
++        return bool(
++            kv_connector is not None and kv_connector.supports_lookahead_block_hashes
++        )
++    return vllm_config.cache_config.enable_prefix_caching
++
++
  def get_request_block_hasher(
      hash_block_size: int,
      caching_hash_fn: Callable[[Any], bytes],
@@ -3681,7 +3790,7 @@ index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62
  ) -> Callable[[Request], list[BlockHash]]:
      """Returns a function which computes the list of un-computed block hashes
      of a request.
-@@ -927,11 +948,15 @@ def get_request_block_hasher(
+@@ -927,11 +973,15 @@ def get_request_block_hasher(
      full prefix, so each hash uniquely fingerprints the prefix ending at its
      boundary. Coarser group block sizes and partial-cache boundaries reuse
      these hashes directly (see ``BlockHashListWithBlockSize``).
@@ -3698,7 +3807,7 @@ index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62
  
          if start_token_idx + hash_block_size > num_tokens:
              # Early stop when there no new full blocks created.
-@@ -959,8 +984,12 @@ def get_request_block_hasher(
+@@ -959,8 +1009,12 @@ def get_request_block_hasher(
                  break
  
              # MM and LoRA requests need extra keys for block-hash computation.
@@ -3713,7 +3822,7 @@ index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62
              )
  
              # Compute the hash of the current block
-@@ -978,6 +1007,56 @@ def get_request_block_hasher(
+@@ -978,6 +1032,56 @@ def get_request_block_hasher(
      return request_block_hasher
  
  
@@ -3771,19 +3880,21 @@ index 5c51a8d131ff97d9c289e952987da31f3a43243d..ce042cd05175d5bd96fe0a9123461a62
      vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
  ) -> float:
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index f5e91e65f7d7a229a1061e69647805b4d336be17..3e9be4f90d92bd32e534775eeb52c8324e634f0e 100644
+index f5e91e65f7d7a229a1061e69647805b4d336be17..043294b32ea3b7e166e44e042f2d4e2cdcf69fd3 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -26,6 +26,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
+@@ -37,7 +37,10 @@ from vllm.v1.core.encoder_cache_manager import (
  )
- from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
- from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+-from vllm.v1.core.kv_cache_utils import KVCacheBlock
++from vllm.v1.core.kv_cache_utils import (
++    KVCacheBlock,
 +    is_lookahead_block_hashing_enabled,
 +)
- from vllm.logger import init_logger
- from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
- from vllm.multimodal.encoder_budget import MultiModalBudget
+ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+ from vllm.v1.core.sched.output import (
+     CachedRequestData,
 @@ -321,6 +324,13 @@ class Scheduler(SchedulerInterface):
                      "acceptance rates."
                  )
@@ -3865,20 +3976,18 @@ index 28a7a1106f7778f6423bdabda1422e31567a85ba..f5d525ed7dfc9ab2ea0e0b4399e12f9c
          if num_cached_blocks >= num_full_blocks:
              return
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
-index d8c976ff693ba821eaa82ca9fa09d9c5251f7280..04497ab540569b92328cd1ef014f84cd87adb73f 100644
+index d8c976ff693ba821eaa82ca9fa09d9c5251f7280..7e2c1fa163cd81f518de0ac44708e8d1ef661e21 100644
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
-@@ -30,6 +30,9 @@ from vllm.distributed import (
- from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
-     measure_encoder_output_widths,
- )
-+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+@@ -56,6 +56,7 @@ from vllm.v1.core.kv_cache_utils import (
+     generate_scheduler_kv_cache_config,
+     get_request_block_hasher,
+     init_none_hash,
 +    is_lookahead_block_hashing_enabled,
-+)
- from vllm.envs import enable_envs_cache
- from vllm.logger import configure_logging, init_logger
- from vllm.logging_utils.dump_input import dump_engine_exception
-@@ -236,7 +239,9 @@ class EngineCore:
+     resolve_cache_hit_alignment_tokens,
+     resolve_kv_cache_block_sizes,
+     update_kv_cache_capacity,
+@@ -236,7 +237,9 @@ class EngineCore:
              init_none_hash(caching_hash_fn)
  
              self.request_block_hasher = get_request_block_hasher(

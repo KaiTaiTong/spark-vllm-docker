@@ -3,7 +3,7 @@ Subject: [PATCH] [Kernel] Allow steering the unquantized linear backend independ
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/59021
 Upstream-Commit: 0d1a683a3471ce352ef5a9aa2d7a9616bd1ac4bf
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 diff --git a/vllm/config/kernel.py b/vllm/config/kernel.py
 index 3d6eee04ffc07e72c8526bcc92d81e480e1498ff..dd6fe8282a230f8793b431e3c213643d1c7c34f3 100644
@@ -31,10 +31,10 @@ index 3d6eee04ffc07e72c8526bcc92d81e480e1498ff..dd6fe8282a230f8793b431e3c213643d
      def _normalize_linear_backend(cls, value: Any) -> Any:
          if isinstance(value, str):
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
-index c9aa433162d2bc2a0585af949c58469eff69f2d2..697b4cd39c67e64d8b0875c48fba439f2f88890e 100644
+index 8f285317e04bad2ec4d57fd0b389bdc8a5a4ae1b..a39a4f5795578112616e7154d5857e9eeefba8ed 100644
 --- a/vllm/engine/arg_utils.py
 +++ b/vllm/engine/arg_utils.py
-@@ -561,6 +561,9 @@ class EngineArgs:
+@@ -566,6 +566,9 @@ class EngineArgs:
      sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
          KernelConfig.sparse_indexer_topk_backend
      )
@@ -44,7 +44,7 @@ index c9aa433162d2bc2a0585af949c58469eff69f2d2..697b4cd39c67e64d8b0875c48fba439f
      all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
      enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
      elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
-@@ -1826,6 +1829,15 @@ class EngineArgs:
+@@ -1835,6 +1838,15 @@ class EngineArgs:
          kernel_group.add_argument(
              "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
          )
@@ -60,7 +60,7 @@ index c9aa433162d2bc2a0585af949c58469eff69f2d2..697b4cd39c67e64d8b0875c48fba439f
  
          # vLLM arguments
          vllm_kwargs = get_kwargs(VllmConfig)
-@@ -2776,6 +2788,10 @@ class EngineArgs:
+@@ -2785,6 +2797,10 @@ class EngineArgs:
              kernel_config.linear_backend = self.linear_backend
          if self.sparse_indexer_topk_backend != "auto":
              kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
@@ -72,7 +72,7 @@ index c9aa433162d2bc2a0585af949c58469eff69f2d2..697b4cd39c67e64d8b0875c48fba439f
          # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
          for op_name, op_priority in asdict(self.ir_op_priority).items():
 diff --git a/vllm/model_executor/layers/linear.py b/vllm/model_executor/layers/linear.py
-index 65cda325a22188c83746121d54567f4f94a229a1..b73267e8bdf624765747dc2249779ed460d70132 100644
+index 5b77caa256d41a828a60ef826e019e9ab4aa014f..deedd9eb62d4943515a623f8dc60b1951c3dedf3 100644
 --- a/vllm/model_executor/layers/linear.py
 +++ b/vllm/model_executor/layers/linear.py
 @@ -172,6 +172,10 @@ class UnquantizedLinearMethod(LinearMethodBase):

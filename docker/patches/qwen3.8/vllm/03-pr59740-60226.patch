@@ -5,7 +5,7 @@ Upstream-PR: https://github.com/vllm-project/vllm/pull/59740
 Upstream-Commit: 6160ed7294754516079e7765f5f7bacf9c1432b6
 Upstream-PR: https://github.com/vllm-project/vllm/pull/60226
 Upstream-Commit: 92ed4c1160e11cd712934eb2525b6df3b8cebb83
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 Combined sparse draft vocabulary and quantized-head support. Preserve both
 unsupported-feature entries when combined with #59973.
@@ -677,7 +677,7 @@ index 0000000000000000000000000000000000000000..0e332a52d3ba5b7faccb01708676b77e
 +    assert reduced > 1.0
 +    assert reduced >= 0.9 * stock
 diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
-index cb9573fd6b5f8f58d6107f2e5654fed30c6063e4..e0b8d4c6ebdb6a52538a759bcfef4ca2b8acf858 100644
+index c4d44eaccae36eadd53d88c8c6c60103cc5b4db6..2d82a6b3f0446f1b6a0f09a591352c6e732f3d48 100644
 --- a/vllm/config/speculative.py
 +++ b/vllm/config/speculative.py
 @@ -472,6 +472,34 @@ class SpeculativeConfig:
@@ -737,10 +737,10 @@ index cb9573fd6b5f8f58d6107f2e5654fed30c6063e4..e0b8d4c6ebdb6a52538a759bcfef4ca2
              self.verify_equal_vocab_size_if_draft_model()
          return self
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index 86696928649505cc4ddbceefc7889eec5e0c064c..df9c0c1a789147c1aa55c4cd373c38081846b4b7 100644
+index ca072b6d0c1d91be5454bbe0b0f42b363a579c0f..054cdd2849b9bdc48230d39aa234b502b34811c4 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -2981,6 +2981,8 @@ class VllmConfig:
+@@ -2994,6 +2994,8 @@ class VllmConfig:
                  unsupported.append("adaptive draft verification")
              if self.speculative_config.draft_lm_head_quantization is not None:
                  unsupported.append("draft lm_head quantization")
@@ -1805,10 +1805,10 @@ index 2acac6b5b7c5979fbca477dabcd0a0aa5bfb0ff7..11d065e7699096a7aba3442d69401a81
  
  class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):
 diff --git a/vllm/model_executor/models/qwen3_dflash.py b/vllm/model_executor/models/qwen3_dflash.py
-index 44b7865daaa6286baabbe5bb0968fa3ac6a58b37..e0ecab4cb7c906625d5a449b3db9ec8e3c4828a6 100644
+index 485ea952fccb1da30b2ed783f6e644e855c3fc0c..18ce9be7f4ac138b682fc91d35fe2bebbe016de5 100644
 --- a/vllm/model_executor/models/qwen3_dflash.py
 +++ b/vllm/model_executor/models/qwen3_dflash.py
-@@ -19,6 +19,7 @@ from vllm.distributed import (
+@@ -18,6 +18,7 @@ from vllm.distributed import (
  )
  from vllm.logger import init_logger
  from vllm.model_executor.layers.attention import Attention
@@ -1816,7 +1816,7 @@ index 44b7865daaa6286baabbe5bb0968fa3ac6a58b37..e0ecab4cb7c906625d5a449b3db9ec8e
  from vllm.model_executor.layers.layernorm import RMSNorm
  from vllm.model_executor.layers.linear import (
      QKVParallelLinear,
-@@ -800,14 +801,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+@@ -781,14 +782,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
          self.logits_processor = LogitsProcessor(
              self.config.draft_vocab_size, scale=logit_scale
          )
@@ -1835,7 +1835,7 @@ index 44b7865daaa6286baabbe5bb0968fa3ac6a58b37..e0ecab4cb7c906625d5a449b3db9ec8e
  
      def embed_input_ids(
          self,
-@@ -837,18 +834,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+@@ -818,18 +815,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
          self,
          hidden_states: torch.Tensor,
      ) -> torch.Tensor | None:

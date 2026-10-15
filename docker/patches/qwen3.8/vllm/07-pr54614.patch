@@ -3,17 +3,17 @@ Subject: [PATCH] [PR #54614] [Kernel] Dynamic NVFP4 W4A4/W4A16 selection with sh
 
 Upstream-PR: https://github.com/vllm-project/vllm/pull/54614
 Upstream-Commit: 5feaedcf9b4fa18d9e0b817153d681bededdd4d9
-Integration-Base: 12b005eefa06f97eeebfae3e14bcac5fa3b81197
+Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
 
 Preserve the quantized-input shape and autotune cache-key tests from main.
 Keep round_up=True and full-model autotuning after removal of the obsolete
 BF16-only warmup path.
 
 diff --git a/.buildkite/test_areas/kernels.yaml b/.buildkite/test_areas/kernels.yaml
-index 472c19e74ae19b4acaf6c9618b0c9476a74f8192..5a3ca8cf7052e068e77c7c0098d54630617c81d4 100644
+index a1224f62315d64500176ecd3ffddfdb5ea831ea8..327fd4989a0dad2fdc74fae73d335930588920b2 100644
 --- a/.buildkite/test_areas/kernels.yaml
 +++ b/.buildkite/test_areas/kernels.yaml
-@@ -718,11 +718,16 @@ steps:
+@@ -739,11 +739,16 @@ steps:
    - vllm/model_executor/layers/quantization/mxfp4.py
    - vllm/model_executor/layers/quantization/utils/b12x_moe.py
    - vllm/model_executor/warmup/b12x_warmup.py
@@ -30,7 +30,7 @@ index 472c19e74ae19b4acaf6c9618b0c9476a74f8192..5a3ca8cf7052e068e77c7c0098d54630
    - tests/kernels/quantization/test_block_fp8.py
    - tests/quantization/reference_mxfp4.py
    - tests/quantization/test_auto_round.py
-@@ -733,6 +738,13 @@ steps:
+@@ -754,6 +759,13 @@ steps:
        kernels/quantization/test_block_fp8.py
        kernels/moe/test_b12x.py
        quantization/test_auto_round.py -k b12x
@@ -905,10 +905,10 @@ index 5c4b877fd795865d50a9e05a5601800e1920ebdc..e4466dea2f87feb9e5306c618fd385d1
      """If True, run FlashInfer autotuning during kernel warmup."""
  
 diff --git a/vllm/model_executor/kernels/linear/__init__.py b/vllm/model_executor/kernels/linear/__init__.py
-index 0ce22f477ac79fbf2866f44c55e5ad77914d787d..6cfcf116d3f085597089858d9c9cd6a66b80f25e 100644
+index ec3059ea7f7e3e16ea10c15a8e6b49e0b94cd6fd..87fb5ccfe361e9a87cb891c430f965e4234dd11a 100644
 --- a/vllm/model_executor/kernels/linear/__init__.py
 +++ b/vllm/model_executor/kernels/linear/__init__.py
-@@ -1180,6 +1180,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+@@ -1190,6 +1190,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
          elif not prefers_humming(compute_capability):
              force_kernel = MarlinNvFp4LinearKernel
  
