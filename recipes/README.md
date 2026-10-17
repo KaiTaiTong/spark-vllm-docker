@@ -282,6 +282,19 @@ Both `run-recipe.sh` and `launch-cluster.sh` accept repeatable `-e VAR=VALUE`
 container environment variables and repeatable `-v LOCAL:CONTAINER` Docker
 volume mappings. Put `launch-cluster.sh` options before `exec`.
 
+Recipe `env:` entries are passed to every container using `-e`, so they are also
+available to mods and Ray workers. Explicit `run-recipe.sh -e VAR=VALUE` arguments
+override recipe values; if a variable is repeated, the last CLI value wins.
+These values override saved `CONTAINER_*` settings as well. Put recipe overrides
+before the `--` separator for extra vLLM arguments.
+
+For example, override the Qwen3.8 Flash Next cluster recipe's shared PLE tables:
+
+```bash
+./run-recipe.sh qwen3.8-flash-next-nvfp4-cluster \
+  -e VLLM_PLE_TABLE_MEMORY=disk -e B12X_DISK_BACKEND=io_uring
+```
+
 ```bash
 ./run-recipe.sh my-recipe --solo \
   -e VLLM_LOGGING_LEVEL=DEBUG \

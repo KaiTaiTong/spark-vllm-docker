@@ -70,6 +70,10 @@ frontend unchanged.
 
 ## QUICK START (USING RECIPES)
 
+Recipe launches check that the model declared in the recipe is in the local
+Hugging Face cache. If it is missing, the runner stops and asks you to rerun
+the same command with `--setup`. Dry runs do not require downloaded models.
+
 ### Single Spark
 
 Check out locally. Do it on the head node of the cluster.
@@ -157,17 +161,18 @@ Launch the server:
     --tensor-parallel-size 1
 ```
 
-### Single Spark: Qwen3.8 Flash Next NVFP4
+### Single Spark: Qwen3.8 Flash Next FP4 Local
 
 This matches the [solo Qwen3.8 Flash Next recipe](recipes/qwen3.8-flash-next-nvfp4-solo.yaml),
-including PLE tables offloaded to disk and speculative decoding.
+using `nvidia/Qwen3.8-Flash-Next-FP4-Local`, with PLE tables offloaded to disk
+through `io_uring` and speculative decoding.
 It uses the B12X model loader and a maximum context length of 262144 tokens.
 
 Pull the tested B12X image and download the model:
 
 ```bash
 ./build-and-copy.sh --exp-b12x
-./hf-download.sh local-inference-lab/Qwen3.8-Flash-Next-NVFP4
+./hf-download.sh nvidia/Qwen3.8-Flash-Next-FP4-Local
 ```
 
 Launch the server:
@@ -175,6 +180,7 @@ Launch the server:
 ```bash
 ./launch-cluster.sh --solo -t vllm-node-b12x \
   -e VLLM_PLE_TABLE_MEMORY=disk \
+  -e B12X_DISK_BACKEND=io_uring \
   -e CUTE_DSL_ARCH=sm_121a \
   -e SAFETENSORS_FAST_GPU=1 \
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -183,10 +189,13 @@ Launch the server:
   -e VLLM_USE_MEGA_AOT_ARTIFACT=1 \
   -e VLLM_USE_V2_MODEL_RUNNER=1 \
   -e B12X_POLICY_MODE=auto \
-  exec vllm serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 \
+  -e VLLM_MXFP8_LM_HEAD=1 \
+  -e VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE=w13 \
+  -e VLLM_B12X_MOE_FP4_FORCE_A16=1 \
+  -e B12X_W4A16_A4_PREFILL=1 \
+  exec vllm serve nvidia/Qwen3.8-Flash-Next-FP4-Local \
     --host 0.0.0.0 \
     --port 8000 \
-    --trust-remote-code \
     --tensor-parallel-size 1 \
     --pipeline-parallel-size 1 \
     --mamba-cache-mode align \
@@ -319,6 +328,36 @@ container's low-memory monitor. See [Launching the Cluster](#2-launching-the-clu
 for additional launcher options.
 
 ## CHANGELOG
+
+### 2026-10-16
+
+'glm-5.3-flash` recipe now uses a new FP4-Local checkpoint from NVIDIA, replacing an older version hosted in local-inference-lab repository. As with Qwen, this checkpoint features compressed scales and is QAD quantized. Up to 2M KV cache on dual Sparks!
+
+### 2026-10-15
+
+#### Qwen 3.8 Flash Next recipes updated
+
+The `qwen3.8-flash-next-nvfp4-solo` and `qwen3.8-flash-next-nvfp4-cluster`recipes now use a new checkpoint from NVIDIA replacing older version hosted in local-inference-lab repository. This checkpoint brings new Compressed Scales and is quantized using QAD method.
+
+The result is better quality and smaller size => more KV cache!
+
+#### New Nemotron 3.5 model family support
+
+Added two recipes for a single DGX Spark:
+
+- [Nemotron 3.5 Super VL 120B-A12B NVFP4](recipes/nemotron-3.5-super-vl-nvfp4.yaml),
+  with image and video input support.
+- [Nemotron 3.5 Bolt 74B-A9B-24GB](recipes/nemotron-3.5-bolt-24gb.yaml).
+
+Run either recipe with:
+
+```bash
+# Super VL
+./run-recipe.sh nemotron-3.5-super-vl-nvfp4 --solo --setup
+
+# Bolt 24GB
+./run-recipe.sh nemotron-3.5-bolt-24gb --solo --setup
+```
 
 ### 2026-10-07
 
