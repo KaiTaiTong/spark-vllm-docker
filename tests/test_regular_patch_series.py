@@ -3,7 +3,6 @@
 
 import ast
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
@@ -272,67 +271,51 @@ class PatchSeriesTests(unittest.TestCase):
         self.assertTrue(runner(10, 7, False, None, low_m_only=True))
         self.assertFalse(runner(10, 0, False, None))
 
-    def test_draft_head_refresh_preserves_native_mrv2_reload(self):
-        upstream, updated = self.apply_upstream_excerpt(
-            "02-pr59973.patch", "vllm/v1/worker/gpu/model_runner.py",
-            "mrv2_reload_upstream.py",
+    def test_streaming_update_preserves_outputs_and_invalidates_lookahead_hash(self):
+        _, updated = self.apply_upstream_excerpt(
+            "06-pr50897.patch", "vllm/v1/core/sched/scheduler.py",
+            "streaming_session_upstream.py",
+            ("+        # A lookahead hash also covers",),
         )
-        before = next(n for n in ast.parse(upstream).body if isinstance(n, ast.ClassDef))
-        after = next(n for n in ast.parse(updated).body if isinstance(n, ast.ClassDef))
-        # The native reload must survive unchanged, including all cache resets.
-        reload_before = next(n for n in before.body if n.name == "reload_weights")
-        reload_after = next(n for n in after.body if n.name == "reload_weights")
-        self.assertEqual(ast.dump(reload_before), ast.dump(reload_after))
-        events = []
-
-        class ReloadBase:
-            def reset_lora_state(self):
-                events.append("lora")
-
-        @contextmanager
-        def config_context(config):
-            events.append(("enter", config))
-            yield
-            events.append("exit")
-
-        reload = Mock(side_effect=lambda *args: events.append(("reload", args)))
-        refresh = Mock(side_effect=lambda draft: events.append(("refresh", draft)))
-        after.bases = [ast.Name(id="ReloadBase", ctx=ast.Load())]
-        after.body = [n for n in after.body if n.name != "get_draft_model"]
-        namespace = {
-            "ReloadBase": ReloadBase, "reload_weights": reload,
-            "set_current_vllm_config": config_context,
-            "refresh_quantized_lm_heads": refresh,
-        }
-        exec("from __future__ import annotations\n" + ast.unparse(after), namespace)
-        runner = namespace["GPUModelRunner"]()
-        runner.vllm_config = object()
-        model, draft, weights = object(), object(), [("weight", object())]
-        runner.get_model = lambda: model
-        runner.get_draft_model = lambda: draft
-        runner.reset_encoder_cache = lambda: events.append("encoder")
-        runner.reset_mm_cache = lambda: events.append("mm")
-        runner.reload_weights(weights, "new-checkpoint", False)
-        self.assertEqual(events, [
-            ("reload", (runner.vllm_config, model, weights, "new-checkpoint", False)),
-            "lora", ("enter", runner.vllm_config), ("refresh", draft),
-            "exit", "encoder", "mm",
-        ])
-        # Weight transfer reaches the same hook without invoking reload_weights.
-        events.clear()
-        runner.reset_lora_state()
-        self.assertEqual(events, [
-            "lora", ("enter", runner.vllm_config), ("refresh", draft), "exit",
-        ])
-        events.clear()
-        runner.get_draft_model = lambda: None
-        runner.reload_weights()
-        self.assertEqual(events[1:], ["lora", "encoder", "mm"])
-        events.clear()
-        reload.side_effect = ValueError("reload failed")
-        with self.assertRaisesRegex(ValueError, "reload failed"):
-            runner.reload_weights()
-        self.assertEqual(events, [])
+        statuses = SimpleNamespace(WAITING_FOR_STREAMING_REQ="streaming", WAITING="waiting")
+        namespace = {"RequestStatus": statuses}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for token_count, computed, plain_hashes, lookahead_hashes in (
+            (9, 3, 2, 1), (8, 3, 1, 1), (1, 0, 0, 0),
+        ):
+            for lookahead in (False, True):
+                with self.subTest(tokens=token_count, lookahead=lookahead):
+                    runner = namespace["Scheduler"]()
+                    runner.hash_block_size = 4
+                    runner.use_lookahead_block_hashes = lookahead
+                    runner.num_waiting_for_streaming_input = 1
+                    runner.log_stats = False
+                    tokens = list(range(token_count))
+                    prompt_end = min(2, token_count - 1)
+                    session = SimpleNamespace(
+                        num_tokens=token_count, num_computed_tokens=computed,
+                        num_prompt_tokens=prompt_end, _all_token_ids=tokens.copy(),
+                        _output_token_ids=tokens[prompt_end:],
+                        prompt_token_ids=tokens[:prompt_end],
+                        block_hashes=["block0", "block1"],
+                        status=statuses.WAITING_FOR_STREAMING_REQ,
+                        update_block_hashes=Mock(),
+                    )
+                    update = SimpleNamespace(
+                        prompt_token_ids=[20, 21], mm_features=[],
+                        arrival_time=123, sampling_params=object(), max_tokens=10,
+                    )
+                    runner._update_request_as_session(session, update)
+                    # Computation may lag behind emitted tokens; only discard
+                    # the final sampled token, then append the next input.
+                    self.assertEqual(session._all_token_ids, tokens[:-1] + [20, 21])
+                    self.assertEqual(session.prompt_token_ids, session._all_token_ids)
+                    self.assertEqual(session._output_token_ids, [])
+                    retained = lookahead_hashes if lookahead else plain_hashes
+                    self.assertEqual(session.block_hashes, ["block0", "block1"][:retained])
+                    session.update_block_hashes.assert_called_once_with()
+                    self.assertEqual(runner.num_waiting_for_streaming_input, 0)
+                    self.assertEqual(session.status, statuses.WAITING)
 
     def test_lookahead_hashing_survives_kv_cache_planning_move(self):
         # #61183 moved the planning functions following the hasher to another

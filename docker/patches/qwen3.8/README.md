@@ -21,28 +21,30 @@ available independently.
 The vLLM order is:
 
 1. [#59958](https://github.com/vllm-project/vllm/pull/59958) and #58815: host-file-gather PLE tables, using #56273's NVFP4 support already in main.
-2. [#59973](https://github.com/vllm-project/vllm/pull/59973): quantized draft heads.
-3. [#59740](https://github.com/vllm-project/vllm/pull/59740) and [#60226](https://github.com/vllm-project/vllm/pull/60226): sparse draft vocabulary, including quantized heads.
-4. [#60068](https://github.com/vllm-project/vllm/pull/60068): adaptive draft depth.
-5. [#54912](https://github.com/vllm-project/vllm/pull/54912): QSA ring sizing.
-6. [#50897](https://github.com/vllm-project/vllm/pull/50897): lookahead-aware prefix hashing.
-7. [#54614](https://github.com/vllm-project/vllm/pull/54614): dynamic NVFP4 linear kernels.
-8. [#54617](https://github.com/vllm-project/vllm/pull/54617): dynamic NVFP4 MoE.
-9. [#60252](https://github.com/vllm-project/vllm/pull/60252): DFlash2 draft cache block sizing.
-10. [#59021](https://github.com/vllm-project/vllm/pull/59021) and [#59025](https://github.com/vllm-project/vllm/pull/59025): separate unquantized linear selection and cuDNN BF16 GEMMs.
-11. The supplied 32,768-token Flash Next draft vocabulary.
-12. [#60646](https://github.com/vllm-project/vllm/pull/60646): CSF-compressed NVFP4 scale loading.
-13. Wheel package-data inclusion for the draft vocabulary.
-14. The local Flash Next FP4 mod from `mods/draft/flash-next-fp4`:
+2. [#59740](https://github.com/vllm-project/vllm/pull/59740) and [#60226](https://github.com/vllm-project/vllm/pull/60226): sparse draft vocabulary, including quantized heads.
+3. [#60068](https://github.com/vllm-project/vllm/pull/60068): adaptive draft depth.
+4. [#54912](https://github.com/vllm-project/vllm/pull/54912): QSA ring sizing.
+5. [#50897](https://github.com/vllm-project/vllm/pull/50897): lookahead-aware prefix hashing.
+6. [#54614](https://github.com/vllm-project/vllm/pull/54614): dynamic NVFP4 linear kernels.
+7. [#54617](https://github.com/vllm-project/vllm/pull/54617): dynamic NVFP4 MoE.
+8. [#60252](https://github.com/vllm-project/vllm/pull/60252): DFlash2 draft cache block sizing.
+9. [#59021](https://github.com/vllm-project/vllm/pull/59021) and [#59025](https://github.com/vllm-project/vllm/pull/59025): separate unquantized linear selection and cuDNN BF16 GEMMs.
+10. The supplied 32,768-token Flash Next draft vocabulary.
+11. [#60646](https://github.com/vllm-project/vllm/pull/60646): CSF-compressed NVFP4 scale loading.
+12. Wheel package-data inclusion for the draft vocabulary.
+13. The local Flash Next FP4 mod from `mods/draft/flash-next-fp4`:
     opt-in resident CSF expert scales, ModelOpt dispatch, nested scale loading,
     weight-transfer helpers, and post-load host-heap trimming. Its vocabulary
     path is packaged alongside the identical existing vocabulary.
-15. `17-flash-next-b12x-loader.patch`: opt-in `--load-format b12x` for Flash
+14. `17-flash-next-b12x-loader.patch`: opt-in `--load-format b12x` for Flash
     Next and its embedded MTP draft on Spark, using FlashInfer's checkpoint
     reader and the weight-transfer helpers supplied by patch 16.
 
 [#55601](https://github.com/vllm-project/vllm/pull/55601) is already in the
-validated upstream base. [#59244](https://github.com/vllm-project/vllm/pull/59244)
+validated upstream base. Quantized draft heads from
+[#59973](https://github.com/vllm-project/vllm/pull/59973) are supplied by upstream
+commit `784d1fff0c491b9add10ecd732de8f707a7e7dbe`; the duplicate patch 02 is retired.
+[#59244](https://github.com/vllm-project/vllm/pull/59244)
 modified a BF16-only warmup workaround that upstream
 [#60434](https://github.com/vllm-project/vllm/pull/60434) subsequently removed.
 The series retains the current full-model autotune path, including cuDNN, and
@@ -57,6 +59,26 @@ Canonical NVFP4 W4A4 MoE from
 upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
+
+On October 25, conflicting sections of vLLM patches 01, 03, 04, 05, 06, and 16
+were refreshed after nightly pipeline 376 stopped at patch 01's PLE test imports.
+Patch 02 was retired because #59973 is merged; keeping the upstream versions of
+its three conflicting files leaves no changes from that patch. The remaining
+15 patches replay on both the failed base
+`24324ef0f667c633ee9bbb9412343d829f7e6d4e` and upstream main
+`0765565f103d5579382ad61994a041654684778b`.
+
+The refresh preserves upstream FLy and heterogeneous-vocabulary validation,
+the Model Runner V1 dynamic-depth guard, the speculator's live model-length
+property, QSA cache views, and loader configuration access. Streaming updates
+retain all emitted tokens except the final sampled token; lookahead hashes
+covering that discarded token are invalidated. Only conflicting file sections
+were regenerated, and the headers record their refresh base. Strict conflict
+handling remains enabled for tests, documentation, and runtime code.
+
+All 118 Python files changed by the series compile on both bases. The 18 CPU
+patch-series tests pass, including streaming updates whose emitted tokens are
+ahead of computation. GPU compilation and inference remain for CI.
 
 On October 24, the FlashInfer series was refreshed against the failed nightly
 base `431c9687f3bb9a048e194c74a178d7cfb02b1585` and replayed on

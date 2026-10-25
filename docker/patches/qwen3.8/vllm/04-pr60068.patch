@@ -4,6 +4,7 @@ Subject: [PATCH] [PR #60068] [MRV2][Spec Decode] Opt-in confidence stop for auto
 Upstream-PR: https://github.com/vllm-project/vllm/pull/60068
 Upstream-Commit: 8ae78ccaf8825b3e55ab014e282c769902ca198c
 Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
+Refresh-Base: 24324ef0f667c633ee9bbb9412343d829f7e6d4e
 
 Preserve both quantized draft-head and adaptive-depth documentation/tests.
 Use #60692's supports_decode_metadata_update API; confidence stopping
@@ -412,10 +413,10 @@ index 2d82a6b3f0446f1b6a0f09a591352c6e732f3d48..001e94d8b663ea0ea058be0a04ee33ee
      def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
          """Mean acceptance length to unconditional per-position rates, using
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index 054cdd2849b9bdc48230d39aa234b502b34811c4..abad73f52bea097230f4360ec22387957b86c493 100644
+index a5f555fa9bd6622a5d244fc617b35edbede25356..a0d7149c4c180a6d68fc555aae336a3d299da605 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -1074,6 +1074,44 @@ class VllmConfig:
+@@ -1109,6 +1109,44 @@ class VllmConfig:
          )
          speculative_config.num_speculative_tokens_per_batch_size = None
  
@@ -460,10 +461,10 @@ index 054cdd2849b9bdc48230d39aa234b502b34811c4..abad73f52bea097230f4360ec2238795
      def _normalize_piecewise_cudagraph_mode(
          self, *, breakable_cudagraph_enabled: bool
      ) -> None:
-@@ -1798,6 +1836,7 @@ class VllmConfig:
-             )
+@@ -1844,6 +1882,7 @@ class VllmConfig:
  
          self._maybe_disable_dynamic_sd_for_data_parallel()
+         self._maybe_disable_dynamic_sd_for_v1()
 +        self._verify_draft_confidence_threshold()
          self._maybe_override_dynamic_sd_cudagraph_mode()
  
@@ -695,10 +696,10 @@ index 0000000000000000000000000000000000000000..ac762b2b38c4c38d815c16befbc8b7b0
 +        self._resolve_pending()
 +        return self._num_drafts_np[slots]
 diff --git a/vllm/v1/worker/gpu/spec_decode/speculator.py b/vllm/v1/worker/gpu/spec_decode/speculator.py
-index d86a0b0351f05073ebecf59af06e68cdcb1ad96c..59f6fb083aab55a1d77889f38098942ade6943e6 100644
+index c54df5ac17c777dd084a003cf0b3bc1e7426ba6e..ce6cbcb2786d5542f1fdb4d0f9f8ad5fa086f2a1 100644
 --- a/vllm/v1/worker/gpu/spec_decode/speculator.py
 +++ b/vllm/v1/worker/gpu/spec_decode/speculator.py
-@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
  from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
      OnlineAcceptanceEstimator,
  )
@@ -706,7 +707,7 @@ index d86a0b0351f05073ebecf59af06e68cdcb1ad96c..59f6fb083aab55a1d77889f38098942a
  from vllm.v1.worker.utils import AttentionGroup
  
  if TYPE_CHECKING:
-@@ -103,6 +104,8 @@ class BaseSpeculator(ABC):
+@@ -104,6 +105,8 @@ class BaseSpeculator(ABC):
  
  
  class DraftModelSpeculator(BaseSpeculator):
@@ -715,9 +716,9 @@ index d86a0b0351f05073ebecf59af06e68cdcb1ad96c..59f6fb083aab55a1d77889f38098942a
      def __init__(self, vllm_config: VllmConfig, device: torch.device):
          self.vllm_config = vllm_config
          self.device = device
-@@ -211,6 +214,18 @@ class DraftModelSpeculator(BaseSpeculator):
-         # in place, so the refresh can be recorded in the draft CUDA graph.
-         self.supports_decode_metadata_update = False
+@@ -206,6 +209,18 @@ class DraftModelSpeculator(BaseSpeculator):
+                 watermark_config.deduplicate_contexts_max_history,
+             )
  
 +        threshold = self.speculative_config.draft_confidence_threshold
 +        if threshold is not None:
@@ -731,10 +732,10 @@ index d86a0b0351f05073ebecf59af06e68cdcb1ad96c..59f6fb083aab55a1d77889f38098942a
 +                device,
 +            )
 +
-     @abstractmethod
-     def load_draft_model(
-         self, target_model: nn.Module, target_attn_layer_names: set[str]
-@@ -451,6 +466,9 @@ class DraftModelSpeculator(BaseSpeculator):
+         self.supports_mm_inputs = False
+         self.pcp_manager: PCPManager | None = None
+         # Whether every draft attention builder can refresh its decode metadata
+@@ -453,6 +468,9 @@ class DraftModelSpeculator(BaseSpeculator):
              return self.get_draft_top_tokens(hidden_states, spec_step_idx)
  
          logits = self.compute_draft_logits(hidden_states, spec_step_idx)
