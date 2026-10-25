@@ -650,6 +650,11 @@ RUN python3 /tmp/vllm-patches/patch_vllm_startup_heap_trim.py .
 # Keep the trial lifetime in call closures so KV profiling can reclaim them.
 RUN python3 /tmp/vllm-patches/patch_vllm_b12x_moe_tuning_memory.py .
 
+# FlashInfer split B12X intrinsics into a package without re-exporting its
+# scale-swizzle helper. Fix the shared NVFP4/MXFP4 accessor in exported wheels;
+# retain support for custom FlashInfer refs with the original module layout.
+RUN python3 /tmp/vllm-patches/patch_vllm_b12x_scale_swizzle.py .
+
 # WSL guest RAM does not describe CUDA's allocation budget on UMA devices.
 # Keep the fix in exported wheels as well as the runner below.
 RUN python3 /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py .

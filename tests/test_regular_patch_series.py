@@ -189,13 +189,13 @@ class PatchSeriesTests(unittest.TestCase):
                     (self.source / "feature").read_text(), "first\n" if expected else "base\n"
                 )
 
-    def apply_upstream_excerpt(self, patch_name, path, fixture, hunk_terms=()):
+    def apply_upstream_excerpt(self, patch_name, path, fixture, hunk_terms=(), project="vllm"):
         target = self.source / path
         target.parent.mkdir(parents=True, exist_ok=True)
         upstream = (PROJECT / "tests/fixtures/qwen38-patch-series" / fixture).read_text()
         target.write_text(upstream)
         self.commit()
-        patch = (PROJECT / "docker/patches/qwen3.8/vllm" / patch_name).read_text()
+        patch = (PROJECT / "docker/patches/qwen3.8" / project / patch_name).read_text()
         section = next(
             s for s in re.split(r"(?m)(?=^diff --git )", patch)
             if s.startswith(f"diff --git a/{path} ")
@@ -207,11 +207,70 @@ class PatchSeriesTests(unittest.TestCase):
             section = header + "".join(selected)
         (self.series / "excerpt.patch").write_text(section)
         (self.series / "series").write_text("excerpt.patch\n")
-        result = self.apply()
+        result = self.apply(project=project)
         self.assertEqual(result.returncode, 0, result.stderr)
         updated = target.read_text()
         compile(updated, path, "exec")
         return upstream, updated
+
+    def test_flashinfer_refresh_preserves_tuning_policy_and_overrides(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
+            "flashinfer_tuning_upstream.py",
+            hunk_terms=("timer (str | None)", "+    timer: str | None"),
+            project="flashinfer",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        # The upstream replace-based override must keep every old/new field.
+        before_tuner = next(n for n in before.body if isinstance(n, ast.ClassDef)
+                            and n.name == "AutoTuner")
+        after_tuner = next(n for n in after.body if isinstance(n, ast.ClassDef)
+                           and n.name == "AutoTuner")
+        self.assertEqual(ast.dump(before_tuner), ast.dump(after_tuner))
+        namespace = {}
+        exec(compile(updated, "tuning_fixture.py", "exec"), namespace)
+        config = namespace["TuningConfig"](
+            use_cuda_graph=True, use_cold_l2_cache=True, cold_chain_launches=4,
+            profile_arena_input_indices=(0,), use_cuda_graph_individual_timing=True,
+            timer="cupti", first_tactic_margin=0.02,
+        )
+        tuner = SimpleNamespace(
+            _override_tuning_buckets=None, _override_round_up=False,
+            _override_cuda_graph_profile_replays=3, _override_config_cache={},
+        )
+        result = namespace["AutoTuner"]._apply_tuning_overrides(tuner, config)
+        self.assertIsNot(result, config)
+        self.assertEqual(result.cuda_graph_profile_replays, 3)
+        self.assertEqual(result.timer, "cupti")
+        self.assertEqual(result.first_tactic_margin, 0.02)
+        self.assertTrue(result.uses_cold_chain)
+        self.assertEqual(result.l2_cache_policy, "cold-chain:4")
+        self.assertTrue(result.use_cuda_graph_individual_timing)
+
+    def test_flashinfer_refresh_preserves_sm107_and_adds_sm12x_dispatch(self):
+        _, updated = self.apply_upstream_excerpt(
+            "02-pr5943.patch", "flashinfer/gemm/gemm_base.py",
+            "flashinfer_mxfp8_dispatch_upstream.py",
+            hunk_terms=("low_m_only``",), project="flashinfer",
+        )
+        sm12x_runner = object()
+
+        def fake_import(name, *args, **kwargs):
+            if name == "kernels.sm12x_mxfp8.runner":
+                return SimpleNamespace(get_runner=lambda: sm12x_runner)
+            if name == "cutlass":
+                return SimpleNamespace()
+            if name == "kernels.dense_blockscaled_gemm_sm100":
+                return SimpleNamespace(Sm100BlockScaledPersistentDenseGemmKernel=object())
+            return __import__(name, *args, **kwargs)
+
+        import builtins
+        namespace = {"__builtins__": {**vars(builtins), "__import__": fake_import}}
+        exec(compile(updated, "gemm_fixture.py", "exec"), namespace)
+        runner = namespace["_cute_dsl_gemm_mxfp8_runner"]
+        self.assertIs(runner(12, 1, False, None), sm12x_runner)
+        self.assertTrue(runner(10, 7, False, None, low_m_only=True))
+        self.assertFalse(runner(10, 0, False, None))
 
     def test_draft_head_refresh_preserves_native_mrv2_reload(self):
         upstream, updated = self.apply_upstream_excerpt(

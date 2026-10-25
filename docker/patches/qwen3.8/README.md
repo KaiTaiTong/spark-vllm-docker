@@ -48,13 +48,28 @@ modified a BF16-only warmup workaround that upstream
 The series retains the current full-model autotune path, including cuDNN, and
 does not restore the obsolete 32-token cap or BF16-only pass.
 
-The FlashInfer order is
-[#5863](https://github.com/flashinfer-ai/flashinfer/pull/5863) (canonical NVFP4
-W4A4 MoE), then [#5943](https://github.com/flashinfer-ai/flashinfer/pull/5943)
-(SM12x CuTe DSL MXFP8 GEMMs). #5943 includes head
+The FlashInfer series contains
+[#5943](https://github.com/flashinfer-ai/flashinfer/pull/5943)
+(SM12x CuTe DSL MXFP8 GEMMs), at head
 `15c5c8d21388c118558c8370299204aa4b110ced`.
+Canonical NVFP4 W4A4 MoE from
+[#5863](https://github.com/flashinfer-ai/flashinfer/pull/5863) is supplied by
+upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
+
+On October 24, the FlashInfer series was refreshed against the failed nightly
+base `431c9687f3bb9a048e194c74a178d7cfb02b1585` and replayed on
+`03f82fddadaebed69879b4e7d28f3df38c4e28d2`. Patch 01 was retired: its added
+lines exactly match the merged #5863 implementation. Patch 02 retains its
+recorded PR snapshot while preserving upstream cold-chain and individual
+timing, `dataclasses.replace` configuration overrides, and SM107 low-M GEMM
+dispatch. Strict patch-conflict handling is unchanged.
+
+Both replays include the loader include-order fix, and all 17 Python files
+changed by the remaining FlashInfer patch compile. CPU regression tests cover
+tuning-policy preservation and SM107/SM12x dispatch. GPU compilation and
+inference remain for CI.
 
 On October 14, the series was refreshed against vLLM
 `355553ac22dca4080929ea8f88a446f15df1f3ba` and FlashInfer
