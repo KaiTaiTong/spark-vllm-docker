@@ -287,7 +287,7 @@ class PatchSeriesTests(unittest.TestCase):
                 with self.subTest(tokens=token_count, lookahead=lookahead):
                     runner = namespace["Scheduler"]()
                     runner.hash_block_size = 4
-                    runner.use_lookahead_block_hashes = lookahead
+                    runner.num_hash_lookahead_tokens = int(lookahead)
                     runner.num_waiting_for_streaming_input = 1
                     runner.log_stats = False
                     tokens = list(range(token_count))
@@ -317,45 +317,66 @@ class PatchSeriesTests(unittest.TestCase):
                     self.assertEqual(runner.num_waiting_for_streaming_input, 0)
                     self.assertEqual(session.status, statuses.WAITING)
 
-    def test_lookahead_hashing_survives_kv_cache_planning_move(self):
-        # #61183 moved the planning functions following the hasher to another
-        # module. The hash helpers must still apply without restoring them.
+    def test_draft_vocab_guard_preserves_parse_mtp_guard(self):
+        _, updated = self.apply_upstream_excerpt(
+            "03-pr59740-60226.patch", "vllm/config/vllm.py",
+            "parse_mtp_guard_upstream.py",
+        )
+        namespace = {}
+        exec(updated, namespace)
+        config = namespace["VllmConfig"]()
+        config.speculative_config = SimpleNamespace(
+            method="mtp", is_xpress=lambda: False,
+            enable_adaptive_verification=False, draft_lm_head_quantization=None,
+            draft_token_map="vocab.json",
+            draft_model_config=SimpleNamespace(architectures=["ParseAuxMTPModel"]),
+        )
+        self.assertEqual(config.unsupported_features(),
+                         ["speculative draft_token_map", "Parse 3.5 MTP"])
+
+    def test_lookahead_connector_gating_preserves_upstream_multi_token_hashing(self):
         upstream, updated = self.apply_upstream_excerpt(
             "06-pr50897.patch", "vllm/v1/core/kv_cache_utils.py",
-            "kv_cache_planning_move_upstream.py",
-            ("+def generate_lookahead_block_hash_extra_keys(",),
+            "lookahead_hashing_merged_upstream.py",
+            ("+def get_num_hash_lookahead_tokens(",),
         )
-        helpers = {
-            "generate_lookahead_block_hash_extra_keys",
-            "generate_request_block_hash_extra_keys",
-        }
         after = ast.parse(updated)
-        after.body = [n for n in after.body if getattr(n, "name", None) not in helpers]
+        after.body = [n for n in after.body
+                      if getattr(n, "name", None) != "get_num_hash_lookahead_tokens"]
         self.assertEqual(ast.dump(ast.parse(upstream)), ast.dump(after))
-
-        extra_keys = Mock(side_effect=[(("block-image",), 4), (("next-image",), 5)])
-        namespace = {"generate_block_hash_extra_keys": extra_keys}
+        namespace = {}
         exec("from __future__ import annotations\n" + updated, namespace)
-        request = SimpleNamespace(all_token_ids=[10, 11, 12, 13, 14])
-        generate = namespace["generate_request_block_hash_extra_keys"]
-        self.assertEqual(
-            generate(request, 0, 4, 3, True),
-            ((("block-image",), 14, ("next-image",)), 4),
+        resolve = namespace["get_num_hash_lookahead_tokens"]
+        spec = SimpleNamespace(use_eagle_block_drop=lambda: True,
+                               disable_lookahead_block_hashes=False)
+        config = SimpleNamespace(
+            speculative_config=spec, kv_transfer_config=None,
+            attention_config=SimpleNamespace(hisparse_config=None),
+            num_hash_lookahead_tokens=3, num_prefill_lookahead_tokens=3,
         )
-        self.assertEqual(
-            [call.args for call in extra_keys.call_args_list],
-            [(request, 0, 4, 3), (request, 4, 5, 4)],
-        )
-        extra_keys.reset_mock(side_effect=True)
-        extra_keys.return_value = (None, 4)
-        self.assertEqual(generate(request, 0, 4, 3, False), (None, 4))
-        extra_keys.assert_called_once_with(request, 0, 4, 3)
+        supported = SimpleNamespace(supports_lookahead_block_hashes=True)
+        unsupported = SimpleNamespace(supports_lookahead_block_hashes=False)
+        self.assertEqual(resolve(config), 3)
+        config.kv_transfer_config = object()
+        self.assertEqual(resolve(config, supported), 0)  # one-token connectors only
+        config.num_prefill_lookahead_tokens = 1
+        self.assertEqual(resolve(config, supported), 1)
+        self.assertEqual(resolve(config, unsupported), 0)
+        self.assertEqual(resolve(config), 0)
+        spec.disable_lookahead_block_hashes = True
+        self.assertEqual(resolve(config, supported), 0)
+        spec.disable_lookahead_block_hashes = False
+        config.attention_config.hisparse_config = object()
+        self.assertEqual(resolve(config, supported), 0)
+        config.kv_transfer_config = None
+        self.assertEqual(resolve(config), 0)
+        config.attention_config.hisparse_config = None
+        config.num_hash_lookahead_tokens = 0
+        self.assertEqual(resolve(config), 0)
 
     def test_core_and_mooncake_retain_matching_replay_boundaries(self):
-        _, core = self.apply_upstream_excerpt(
-            "06-pr50897.patch", "vllm/v1/core/kv_cache_coordinator.py",
-            "replay_boundaries_upstream.py", ("use_eagle=bool(self.eagle_group_ids)",),
-        )
+        # #61589 now supplies core replay policy unchanged by our patch.
+        core = (PROJECT / "tests/fixtures/qwen38-patch-series/replay_boundaries_upstream.py").read_text()
         _, mooncake = self.apply_upstream_excerpt(
             "06-pr50897.patch",
             "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/coordinator.py",

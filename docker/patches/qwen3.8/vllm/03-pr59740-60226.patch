@@ -6,7 +6,7 @@ Upstream-Commit: 6160ed7294754516079e7765f5f7bacf9c1432b6
 Upstream-PR: https://github.com/vllm-project/vllm/pull/60226
 Upstream-Commit: 92ed4c1160e11cd712934eb2525b6df3b8cebb83
 Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
-Refresh-Base: 24324ef0f667c633ee9bbb9412343d829f7e6d4e
+Refresh-Base: fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5
 
 Combined sparse draft vocabulary and quantized-head support. Preserve both
 unsupported-feature entries when combined with #59973.
@@ -738,18 +738,18 @@ index 373344a5d875f3234b871cafe3239b003474f2ba..ac32e4eb95e94c35f615068c111aa200
              self.verify_equal_vocab_size_if_draft_model()
          return self
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index ca072b6d0c1d91be5454bbe0b0f42b363a579c0f..054cdd2849b9bdc48230d39aa234b502b34811c4 100644
+index 0bc97cc2cb5a92541397903246a981700ba04dc2..a65f5b7960ab8c99f1bf947e154d1e87baf78ffb 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -2994,6 +2994,8 @@ class VllmConfig:
+@@ -3117,6 +3117,8 @@ class VllmConfig:
                  unsupported.append("adaptive draft verification")
              if self.speculative_config.draft_lm_head_quantization is not None:
                  unsupported.append("draft lm_head quantization")
 +            if self.speculative_config.draft_token_map is not None:
 +                unsupported.append("speculative draft_token_map")
  
-         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
-         if self._dflash_needs_multi_kv_group():
+         # The attention-free Parse MTP draft requires the V2 speculator.
+         if self.speculative_config:
 diff --git a/vllm/model_executor/layers/draft_vocab.py b/vllm/model_executor/layers/draft_vocab.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..c56135431a5615096077b7963726a847ac11c0a4

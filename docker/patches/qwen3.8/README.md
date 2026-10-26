@@ -60,6 +60,22 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+On October 26, patches 03, 04, 06, 07, and 08 were refreshed against pipeline
+377's failed vLLM base `fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5`. Patch 03 keeps
+the new Parse MTP validation beside the draft-vocabulary guard. Upstream
+[#61589](https://github.com/vllm-project/vllm/pull/61589) now supplies the core
+lookahead hashing, including multi-token lookahead and the current KV-event
+format. Patch 06 retains the one-token KV-connector extensions and streaming
+hash invalidation, using the upstream integer API. HiSparse retains the legacy
+block-drop behavior. Patch 07 preserves upstream's disabled B12X Buildkite job
+and its AMD router mirror; patch 08 preserves the expanded monokernel settings.
+
+All 15 patches apply directly to a fresh copy of that source tree without old
+patch-base objects. All 107 changed Python files compile, all 19 subsequent
+Docker source patchers apply, and the 19 CPU series tests and 101 build checks
+pass. The regressions cover the Parse MTP guard and local multi-token versus
+connector one-token hashing. GPU compilation and inference remain for CI.
+
 On October 25, conflicting sections of vLLM patches 01, 03, 04, 05, 06, and 16
 were refreshed after nightly pipeline 376 stopped at patch 01's PLE test imports.
 Patch 02 was retired because #59973 is merged; keeping the upstream versions of
