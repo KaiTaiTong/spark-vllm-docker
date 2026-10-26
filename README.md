@@ -184,6 +184,7 @@ Launch the server:
 
 ```bash
 ./launch-cluster.sh --solo -t vllm-node-b12x \
+  -e PYTORCH_ALLOC_CONF=per_process_memory_fraction:0.8 \
   -e VLLM_PLE_TABLE_MEMORY=disk \
   -e B12X_DISK_BACKEND=io_uring \
   -e CUTE_DSL_ARCH=sm_121a \

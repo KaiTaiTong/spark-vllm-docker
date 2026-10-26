@@ -288,6 +288,15 @@ override recipe values; if a variable is repeated, the last CLI value wins.
 These values override saved `CONTAINER_*` settings as well. Put recipe overrides
 before the `--` separator for extra vLLM arguments.
 
+The [Qwen3.8 Flash Next solo recipe](qwen3.8-flash-next-nvfp4-solo.yaml)
+sets `PYTORCH_ALLOC_CONF=per_process_memory_fraction:0.8` to cap total PyTorch
+CUDA reservation, including cached memory, during A16 weight preparation on
+Spark's shared RAM. This preserves A16 decode and compressed scales. The cap
+also applies during serving and is separate from vLLM's
+`--gpu-memory-utilization` budget; increasing `--gpu-mem` does not raise it.
+Override it explicitly with `-e PYTORCH_ALLOC_CONF=per_process_memory_fraction:VALUE`
+when tuning memory use. This setting is specific to the solo recipe.
+
 For example, override the Qwen3.8 Flash Next cluster recipe's shared PLE tables:
 
 ```bash
