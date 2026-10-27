@@ -60,6 +60,22 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+On October 27, pipeline 378 stopped at patch 04 on upstream vLLM
+`90309f6b742cdb1d6305778b81063918cf61be81`. The draft sampler now dispatches
+watermarked and ordinary probabilistic sampling through separate branches.
+Patch 04 keeps both branches, including the sharded-logit arguments, and
+updates confidence before either sampler can modify the logits in place.
+Patch 05's test-import context was also refreshed after upstream removed the
+Qwen3.5 model-config import; the QSA ring implementation and tests are retained.
+
+All 15 patches apply directly to a fresh archive of that revision without old
+patch-base objects, and the resulting tree matches the development replay.
+All 19 subsequent Docker source patchers pass and all 114 changed Python files
+compile. The 20 CPU series tests and 101 build checks pass. The new regression
+covers watermark, sharded probabilistic, greedy, and local-argmax draft sampling,
+including confidence checks before in-place logit modification. Full wheel
+compilation and inference remain for CI.
+
 On October 26, patches 03, 04, 06, 07, and 08 were refreshed against pipeline
 377's failed vLLM base `fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5`. Patch 03 keeps
 the new Parse MTP validation beside the draft-vocabulary guard. Upstream

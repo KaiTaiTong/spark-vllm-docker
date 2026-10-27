@@ -594,6 +594,87 @@ class PatchSeriesTests(unittest.TestCase):
                         result = module.forward(hidden, Rows(range(4)), None, None)
                         self.assertEqual(result, [2] * len(hidden))
 
+    def test_confidence_stop_preserves_watermarked_and_sharded_sampling(self):
+        _, updated = self.apply_upstream_excerpt(
+            "04-pr60068.patch",
+            "vllm/v1/worker/gpu/spec_decode/speculator.py",
+            "draft_sampling_upstream.py", ("self.confidence_stop.update",),
+        )
+        namespace = {}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for route in ("watermark", "gumbel", "greedy"):
+            for confidence_enabled in (False, True):
+                with self.subTest(route=route, confidence=confidence_enabled):
+                    events = []
+
+                    class Logits(list):
+                        def argmax(self, dim):
+                            self.argmax_dim = dim
+                            events.append("greedy")
+                            return "greedy"
+
+                    logits = Logits([11.0])
+
+                    def sample(values, *args, **kwargs):
+                        events.append(route)
+                        values[0] = -1.0  # Sampling can change logits in place.
+                        return route
+
+                    sampler = Mock(side_effect=sample)
+                    namespace["gumbel_sample"] = sampler
+                    confidence = Mock(side_effect=lambda values, step: events.append(
+                        ("confidence", list(values), step)
+                    ))
+                    speculator = namespace["DraftModelSpeculator"]()
+                    speculator.use_local_argmax_reduction = False
+                    speculator.confidence_stop = (
+                        SimpleNamespace(update=confidence) if confidence_enabled else None
+                    )
+                    speculator.draft_watermarker = (
+                        SimpleNamespace(sample=sampler) if route == "watermark" else None
+                    )
+                    speculator.compute_draft_logits = Mock(return_value=logits)
+                    speculator.use_fp64_gumbel = True
+                    speculator.draft_logits_num_shards = 3
+                    speculator.draft_logits_shard_idx = 1
+                    speculator._maybe_predict_acceptance = Mock()
+                    cache = None if route == "greedy" else object()
+                    result = speculator.sample_draft(
+                        "hidden", "positions", "indices", "temperature", "seeds",
+                        2, cache, spec_step_idx=1, num_steps=2,
+                    )
+                    self.assertEqual(result, route)
+                    self.assertEqual(events,
+                                     ([("confidence", [11.0], 2)] if confidence_enabled
+                                      else []) + [route])
+                    speculator.compute_draft_logits.assert_called_once_with("hidden", 1)
+                    speculator._maybe_predict_acceptance.assert_called_once_with(
+                        logits, "indices", 2,
+                    )
+                    if route == "greedy":
+                        sampler.assert_not_called()
+                        self.assertEqual(logits.argmax_dim, -1)
+                    else:
+                        kwargs = sampler.call_args.kwargs
+                        self.assertIs(kwargs["logits_cache"], cache)
+                        self.assertEqual(kwargs["logits_cache_col"], 2)
+                        self.assertTrue(kwargs["apply_temperature"])
+                        if route == "watermark":
+                            self.assertEqual(kwargs["num_steps"], 2)
+                        else:
+                            self.assertEqual(kwargs["logits_cache_num_shards"], 3)
+                            self.assertEqual(kwargs["logits_cache_shard_idx"], 1)
+
+        speculator.use_local_argmax_reduction = True
+        speculator.confidence_stop = None
+        speculator.get_draft_top_tokens = Mock(return_value="local")
+        speculator.compute_draft_logits.reset_mock()
+        self.assertEqual(speculator.sample_draft(
+            "hidden", None, None, None, None, 0, None, spec_step_idx=2,
+        ), "local")
+        speculator.get_draft_top_tokens.assert_called_once_with("hidden", 2)
+        speculator.compute_draft_logits.assert_not_called()
+
     def test_confidence_stop_disables_fused_decode_after_metadata_refactor(self):
         _, updated = self.apply_upstream_excerpt(
             "04-pr60068.patch",
