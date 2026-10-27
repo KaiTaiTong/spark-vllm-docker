@@ -4,13 +4,13 @@ Subject: [PATCH] [Bugfix] Widen the QSA raw-key ring instead of asserting divisi
 Upstream-PR: https://github.com/vllm-project/vllm/pull/54912
 Upstream-Commit: 77b5ae7e2d9ce2dec02ea9bf40fa96ed4e53a071
 Integration-Base: 355553ac22dca4080929ea8f88a446f15df1f3ba
-Refresh-Base: 90309f6b742cdb1d6305778b81063918cf61be81
+Refresh-Base: 6aa70c4beca4f85c44b9f04c23f46326d9261f14
 
 diff --git a/tests/models/qwen4_exp/test_config.py b/tests/models/qwen4_exp/test_config.py
-index d3f54376fee41744712f728e321b30acfb170351..31ef360801d37a5ec06775b51ac07dd17ddeda47 100644
+index 18246dbd08911ad33c6f96faf3a47291b569162b..4ac0d6c89eebccf9758b7559a0e179f59d4d7aa6 100644
 --- a/tests/models/qwen4_exp/test_config.py
 +++ b/tests/models/qwen4_exp/test_config.py
-@@ -14,7 +14,12 @@ from vllm.config.speculative import SpeculativeConfig
+@@ -17,11 +17,16 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
  from vllm.model_executor.models.config import (
      Qwen4ExpForConditionalGenerationConfig,
  )
@@ -18,15 +18,19 @@ index d3f54376fee41744712f728e321b30acfb170351..31ef360801d37a5ec06775b51ac07dd1
 +    QSA_RING_MAX_WIDENING,
 +    qsa_ring_capacity,
 +)
+ from vllm.models.qwen4_exp.nvidia.model import (
+     Qwen4ExpForCausalLM,
+     Qwen4ExpForConditionalGeneration,
+ )
  from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 +from vllm.utils.math_utils import cdiv
  from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
  
  from ...utils import spawn_new_process_for_each_test
-@@ -296,3 +301,39 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
+@@ -319,3 +324,39 @@ def test_qkv_proj_mapping_allows_bf16_indexer(model_cls) -> None:
+         ignore=["model.layers.3.self_attn.indexer.index_qk_proj"],
+         fused_mapping=model_cls.packed_modules_mapping,
      )
-     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
-     assert second["ngram_context"].data_ptr() == ngram_context_ptr
 +
 +
 +@pytest.mark.parametrize("block_size", [848, 1616])

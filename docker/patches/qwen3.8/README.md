@@ -60,6 +60,19 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+Later on October 27, job 684 stopped at patch 05 on upstream vLLM
+`6aa70c4beca4f85c44b9f04c23f46326d9261f14`. Upstream added model imports and
+a BF16-indexer regression test in `tests/models/qwen4_exp/test_config.py`.
+Patch 05's test section now preserves those additions alongside all three QSA
+ring tests. Its runtime patch is unchanged.
+
+All 15 patches replay from a fresh source archive without old patch-base
+objects and produce the same tree as the development replay. All 19 subsequent
+Docker source patchers and CUTLASS pinning pass; all 114 changed Python files
+compile. The 21 CPU series tests and 101 build checks pass. The new regression
+reproduces the old import conflict and checks that upstream's BF16-indexer test
+survives. Full wheel compilation and inference remain for CI.
+
 On October 27, pipeline 378 stopped at patch 04 on upstream vLLM
 `90309f6b742cdb1d6305778b81063918cf61be81`. The draft sampler now dispatches
 watermarked and ordinary probabilistic sampling through separate branches.

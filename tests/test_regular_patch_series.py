@@ -212,6 +212,40 @@ class PatchSeriesTests(unittest.TestCase):
         compile(updated, path, "exec")
         return upstream, updated
 
+    def test_qsa_ring_patch_preserves_upstream_bf16_indexer_test(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "05-pr54912.patch", "tests/models/qwen4_exp/test_config.py",
+            "qsa_config_upstream.py",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        added_tests = {
+            "test_qsa_ring_capacity_divides_block_size",
+            "test_qsa_ring_capacity_widens_within_bound",
+            "test_qsa_ring_capacity_refuses_disproportionate_widening",
+        }
+        added_imports = {
+            "vllm.models.qwen4_exp.common.qsa_cache",
+            "vllm.utils.math_utils",
+        }
+        functions = [n.name for n in after.body if isinstance(n, ast.FunctionDef)]
+        for name in added_tests:
+            self.assertEqual(functions.count(name), 1)
+        self.assertEqual(
+            {n.module: [alias.name for alias in n.names]
+             for n in after.body if isinstance(n, ast.ImportFrom)
+             and n.module in added_imports},
+            {"vllm.models.qwen4_exp.common.qsa_cache":
+             ["QSA_RING_MAX_WIDENING", "qsa_ring_capacity"],
+             "vllm.utils.math_utils": ["cdiv"]},
+        )
+        after.body = [n for n in after.body if not (
+            isinstance(n, ast.FunctionDef) and n.name in added_tests
+            or isinstance(n, ast.ImportFrom) and n.module in added_imports
+        )]
+        # Preserve the new model imports and BF16-indexer regression verbatim.
+        self.assertEqual(ast.dump(before), ast.dump(after))
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_flashinfer_refresh_preserves_tuning_policy_and_overrides(self):
         upstream, updated = self.apply_upstream_excerpt(
             "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
