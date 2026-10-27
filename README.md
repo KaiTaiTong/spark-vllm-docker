@@ -2182,6 +2182,12 @@ discovered correctly:
 | `start \| stop \| status \| exec` | Action to perform. Use `start` for idle containers or `exec` to run a command. Not compatible with `--launch-script`. |
 | `command` | Command to execute inside the container (only for `exec` action). |
 
+When a foreground `exec` command fails, the launcher prints the last 200
+container-log lines from the head and each worker before cleanup. This includes
+detached worker tracebacks and earlyoom output in the terminal or CI job log.
+Log collection is limited to 15 seconds per node and preserves the command's
+original exit status.
+
 ### Early OOM Monitor
 
 The `--earlyoom` flag starts the idle container with `earlyoom` as PID 1 instead of `sleep infinity`, so it monitors memory while Ray and vLLM are launched with `docker exec`. This is optional; without `--earlyoom`, containers still use the plain idle command.

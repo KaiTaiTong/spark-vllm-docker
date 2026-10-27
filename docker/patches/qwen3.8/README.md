@@ -60,6 +60,19 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+The next October 27 run, job 685, reached patch 10 on upstream vLLM
+`c4f2bb4abbdbad9ed5b0a71acd0bd585056eeab8` and conflicted with the new RDNA
+hybrid prefill-dequantization setting. Patch 10 now retains that setting and
+its validator alongside the independent unquantized-linear backend override.
+
+All 15 patches and 19 subsequent Docker source patchers replay on fresh
+archives of both the failed revision and upstream main
+`c56706e88e0a699274e7ed807e072274048d1c33`. CUTLASS pinning passes and all 114
+changed Python files compile on both revisions. The 22 CPU series tests and
+101 build checks pass; the new regression preserves the RDNA setting and
+normalization while adding the unquantized override. Full wheel compilation
+and inference remain for CI.
+
 Later on October 27, job 684 stopped at patch 05 on upstream vLLM
 `6aa70c4beca4f85c44b9f04c23f46326d9261f14`. Upstream added model imports and
 a BF16-indexer regression test in `tests/models/qwen4_exp/test_config.py`.

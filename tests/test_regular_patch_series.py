@@ -246,6 +246,41 @@ class PatchSeriesTests(unittest.TestCase):
         self.assertEqual(ast.dump(before), ast.dump(after))
         self.assertEqual(self.git("status", "--porcelain"), "")
 
+    def test_unquantized_backend_preserves_rdna_prefill_setting(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "10-pr59021.patch", "vllm/config/kernel.py",
+            "kernel_rdna_prefill_upstream.py",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        kernel = next(n for n in after.body if isinstance(n, ast.ClassDef))
+        field_index = next(
+            i for i, n in enumerate(kernel.body) if isinstance(n, ast.AnnAssign)
+            and n.target.id == "unquantized_linear_backend"
+        )
+        self.assertEqual(kernel.body[field_index].value.value, "auto")
+        self.assertIsInstance(kernel.body[field_index + 1], ast.Expr)
+        del kernel.body[field_index:field_index + 2]
+        normalizer = next(n for n in kernel.body if isinstance(n, ast.FunctionDef)
+                          and n.name == "_normalize_linear_backend")
+        validator = normalizer.decorator_list[0]
+        self.assertEqual([arg.value for arg in validator.args],
+                         ["linear_backend", "unquantized_linear_backend"])
+        validator.args.pop()
+        # Only the new field/docstring and validator registration may differ.
+        self.assertEqual(ast.dump(before), ast.dump(after))
+
+        namespace = {
+            "Field": lambda **kwargs: kwargs["default"],
+            "field_validator": lambda *args, **kwargs: lambda fn: fn,
+        }
+        exec(compile(updated, "kernel_fixture.py", "exec"), namespace)
+        config = namespace["KernelConfig"]
+        self.assertEqual(config._normalize_linear_backend("FLASHINFER-CUDNN"),
+                         "flashinfer_cudnn")
+        self.assertEqual(config.rdna_hybrid_w4a16_prefill_dequant, "disable")
+        self.assertEqual(config._normalize_rdna_hybrid_w4a16_prefill_dequant("ENABLE"),
+                         "enable")
+
     def test_flashinfer_refresh_preserves_tuning_policy_and_overrides(self):
         upstream, updated = self.apply_upstream_excerpt(
             "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
