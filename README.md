@@ -67,6 +67,11 @@ remain exempt. This includes protecting `/metrics`, `/tokenize`, and the API
 docs. The patch is included in exported vLLM wheels and leaves the Rust
 frontend unchanged.
 
+B12X source builds fix the shared NVFP4/MXFP4 scale-swizzle accessor for
+FlashInfer's split `intrinsics.reference` module, while retaining support for
+older FlashInfer refs. The fix is applied before compilation and included in
+exported vLLM wheels.
+
 
 ## QUICK START (USING RECIPES)
 
@@ -179,6 +184,7 @@ Launch the server:
 
 ```bash
 ./launch-cluster.sh --solo -t vllm-node-b12x \
+  -e PYTORCH_ALLOC_CONF=per_process_memory_fraction:0.8 \
   -e VLLM_PLE_TABLE_MEMORY=disk \
   -e B12X_DISK_BACKEND=io_uring \
   -e CUTE_DSL_ARCH=sm_121a \

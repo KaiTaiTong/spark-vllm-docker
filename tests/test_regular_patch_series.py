@@ -3,7 +3,6 @@
 
 import ast
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
@@ -189,13 +188,13 @@ class PatchSeriesTests(unittest.TestCase):
                     (self.source / "feature").read_text(), "first\n" if expected else "base\n"
                 )
 
-    def apply_upstream_excerpt(self, patch_name, path, fixture, hunk_terms=()):
+    def apply_upstream_excerpt(self, patch_name, path, fixture, hunk_terms=(), project="vllm"):
         target = self.source / path
         target.parent.mkdir(parents=True, exist_ok=True)
         upstream = (PROJECT / "tests/fixtures/qwen38-patch-series" / fixture).read_text()
         target.write_text(upstream)
         self.commit()
-        patch = (PROJECT / "docker/patches/qwen3.8/vllm" / patch_name).read_text()
+        patch = (PROJECT / "docker/patches/qwen3.8" / project / patch_name).read_text()
         section = next(
             s for s in re.split(r"(?m)(?=^diff --git )", patch)
             if s.startswith(f"diff --git a/{path} ")
@@ -207,113 +206,177 @@ class PatchSeriesTests(unittest.TestCase):
             section = header + "".join(selected)
         (self.series / "excerpt.patch").write_text(section)
         (self.series / "series").write_text("excerpt.patch\n")
-        result = self.apply()
+        result = self.apply(project=project)
         self.assertEqual(result.returncode, 0, result.stderr)
         updated = target.read_text()
         compile(updated, path, "exec")
         return upstream, updated
 
-    def test_draft_head_refresh_preserves_native_mrv2_reload(self):
+    def test_flashinfer_refresh_preserves_tuning_policy_and_overrides(self):
         upstream, updated = self.apply_upstream_excerpt(
-            "02-pr59973.patch", "vllm/v1/worker/gpu/model_runner.py",
-            "mrv2_reload_upstream.py",
+            "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
+            "flashinfer_tuning_upstream.py",
+            hunk_terms=("timer (str | None)", "+    timer: str | None"),
+            project="flashinfer",
         )
-        before = next(n for n in ast.parse(upstream).body if isinstance(n, ast.ClassDef))
-        after = next(n for n in ast.parse(updated).body if isinstance(n, ast.ClassDef))
-        # The native reload must survive unchanged, including all cache resets.
-        reload_before = next(n for n in before.body if n.name == "reload_weights")
-        reload_after = next(n for n in after.body if n.name == "reload_weights")
-        self.assertEqual(ast.dump(reload_before), ast.dump(reload_after))
-        events = []
+        before, after = ast.parse(upstream), ast.parse(updated)
+        # The upstream replace-based override must keep every old/new field.
+        before_tuner = next(n for n in before.body if isinstance(n, ast.ClassDef)
+                            and n.name == "AutoTuner")
+        after_tuner = next(n for n in after.body if isinstance(n, ast.ClassDef)
+                           and n.name == "AutoTuner")
+        self.assertEqual(ast.dump(before_tuner), ast.dump(after_tuner))
+        namespace = {}
+        exec(compile(updated, "tuning_fixture.py", "exec"), namespace)
+        config = namespace["TuningConfig"](
+            use_cuda_graph=True, use_cold_l2_cache=True, cold_chain_launches=4,
+            profile_arena_input_indices=(0,), use_cuda_graph_individual_timing=True,
+            timer="cupti", first_tactic_margin=0.02,
+        )
+        tuner = SimpleNamespace(
+            _override_tuning_buckets=None, _override_round_up=False,
+            _override_cuda_graph_profile_replays=3, _override_config_cache={},
+        )
+        result = namespace["AutoTuner"]._apply_tuning_overrides(tuner, config)
+        self.assertIsNot(result, config)
+        self.assertEqual(result.cuda_graph_profile_replays, 3)
+        self.assertEqual(result.timer, "cupti")
+        self.assertEqual(result.first_tactic_margin, 0.02)
+        self.assertTrue(result.uses_cold_chain)
+        self.assertEqual(result.l2_cache_policy, "cold-chain:4")
+        self.assertTrue(result.use_cuda_graph_individual_timing)
 
-        class ReloadBase:
-            def reset_lora_state(self):
-                events.append("lora")
+    def test_flashinfer_refresh_preserves_sm107_and_adds_sm12x_dispatch(self):
+        _, updated = self.apply_upstream_excerpt(
+            "02-pr5943.patch", "flashinfer/gemm/gemm_base.py",
+            "flashinfer_mxfp8_dispatch_upstream.py",
+            hunk_terms=("low_m_only``",), project="flashinfer",
+        )
+        sm12x_runner = object()
 
-        @contextmanager
-        def config_context(config):
-            events.append(("enter", config))
-            yield
-            events.append("exit")
+        def fake_import(name, *args, **kwargs):
+            if name == "kernels.sm12x_mxfp8.runner":
+                return SimpleNamespace(get_runner=lambda: sm12x_runner)
+            if name == "cutlass":
+                return SimpleNamespace()
+            if name == "kernels.dense_blockscaled_gemm_sm100":
+                return SimpleNamespace(Sm100BlockScaledPersistentDenseGemmKernel=object())
+            return __import__(name, *args, **kwargs)
 
-        reload = Mock(side_effect=lambda *args: events.append(("reload", args)))
-        refresh = Mock(side_effect=lambda draft: events.append(("refresh", draft)))
-        after.bases = [ast.Name(id="ReloadBase", ctx=ast.Load())]
-        after.body = [n for n in after.body if n.name != "get_draft_model"]
-        namespace = {
-            "ReloadBase": ReloadBase, "reload_weights": reload,
-            "set_current_vllm_config": config_context,
-            "refresh_quantized_lm_heads": refresh,
-        }
-        exec("from __future__ import annotations\n" + ast.unparse(after), namespace)
-        runner = namespace["GPUModelRunner"]()
-        runner.vllm_config = object()
-        model, draft, weights = object(), object(), [("weight", object())]
-        runner.get_model = lambda: model
-        runner.get_draft_model = lambda: draft
-        runner.reset_encoder_cache = lambda: events.append("encoder")
-        runner.reset_mm_cache = lambda: events.append("mm")
-        runner.reload_weights(weights, "new-checkpoint", False)
-        self.assertEqual(events, [
-            ("reload", (runner.vllm_config, model, weights, "new-checkpoint", False)),
-            "lora", ("enter", runner.vllm_config), ("refresh", draft),
-            "exit", "encoder", "mm",
-        ])
-        # Weight transfer reaches the same hook without invoking reload_weights.
-        events.clear()
-        runner.reset_lora_state()
-        self.assertEqual(events, [
-            "lora", ("enter", runner.vllm_config), ("refresh", draft), "exit",
-        ])
-        events.clear()
-        runner.get_draft_model = lambda: None
-        runner.reload_weights()
-        self.assertEqual(events[1:], ["lora", "encoder", "mm"])
-        events.clear()
-        reload.side_effect = ValueError("reload failed")
-        with self.assertRaisesRegex(ValueError, "reload failed"):
-            runner.reload_weights()
-        self.assertEqual(events, [])
+        import builtins
+        namespace = {"__builtins__": {**vars(builtins), "__import__": fake_import}}
+        exec(compile(updated, "gemm_fixture.py", "exec"), namespace)
+        runner = namespace["_cute_dsl_gemm_mxfp8_runner"]
+        self.assertIs(runner(12, 1, False, None), sm12x_runner)
+        self.assertTrue(runner(10, 7, False, None, low_m_only=True))
+        self.assertFalse(runner(10, 0, False, None))
 
-    def test_lookahead_hashing_survives_kv_cache_planning_move(self):
-        # #61183 moved the planning functions following the hasher to another
-        # module. The hash helpers must still apply without restoring them.
+    def test_streaming_update_preserves_outputs_and_invalidates_lookahead_hash(self):
+        _, updated = self.apply_upstream_excerpt(
+            "06-pr50897.patch", "vllm/v1/core/sched/scheduler.py",
+            "streaming_session_upstream.py",
+            ("+        # A lookahead hash also covers",),
+        )
+        statuses = SimpleNamespace(WAITING_FOR_STREAMING_REQ="streaming", WAITING="waiting")
+        namespace = {"RequestStatus": statuses}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for token_count, computed, plain_hashes, lookahead_hashes in (
+            (9, 3, 2, 1), (8, 3, 1, 1), (1, 0, 0, 0),
+        ):
+            for lookahead in (False, True):
+                with self.subTest(tokens=token_count, lookahead=lookahead):
+                    runner = namespace["Scheduler"]()
+                    runner.hash_block_size = 4
+                    runner.num_hash_lookahead_tokens = int(lookahead)
+                    runner.num_waiting_for_streaming_input = 1
+                    runner.log_stats = False
+                    tokens = list(range(token_count))
+                    prompt_end = min(2, token_count - 1)
+                    session = SimpleNamespace(
+                        num_tokens=token_count, num_computed_tokens=computed,
+                        num_prompt_tokens=prompt_end, _all_token_ids=tokens.copy(),
+                        _output_token_ids=tokens[prompt_end:],
+                        prompt_token_ids=tokens[:prompt_end],
+                        block_hashes=["block0", "block1"],
+                        status=statuses.WAITING_FOR_STREAMING_REQ,
+                        update_block_hashes=Mock(),
+                    )
+                    update = SimpleNamespace(
+                        prompt_token_ids=[20, 21], mm_features=[],
+                        arrival_time=123, sampling_params=object(), max_tokens=10,
+                    )
+                    runner._update_request_as_session(session, update)
+                    # Computation may lag behind emitted tokens; only discard
+                    # the final sampled token, then append the next input.
+                    self.assertEqual(session._all_token_ids, tokens[:-1] + [20, 21])
+                    self.assertEqual(session.prompt_token_ids, session._all_token_ids)
+                    self.assertEqual(session._output_token_ids, [])
+                    retained = lookahead_hashes if lookahead else plain_hashes
+                    self.assertEqual(session.block_hashes, ["block0", "block1"][:retained])
+                    session.update_block_hashes.assert_called_once_with()
+                    self.assertEqual(runner.num_waiting_for_streaming_input, 0)
+                    self.assertEqual(session.status, statuses.WAITING)
+
+    def test_draft_vocab_guard_preserves_parse_mtp_guard(self):
+        _, updated = self.apply_upstream_excerpt(
+            "03-pr59740-60226.patch", "vllm/config/vllm.py",
+            "parse_mtp_guard_upstream.py",
+        )
+        namespace = {}
+        exec(updated, namespace)
+        config = namespace["VllmConfig"]()
+        config.speculative_config = SimpleNamespace(
+            method="mtp", is_xpress=lambda: False,
+            enable_adaptive_verification=False, draft_lm_head_quantization=None,
+            draft_token_map="vocab.json",
+            draft_model_config=SimpleNamespace(architectures=["ParseAuxMTPModel"]),
+        )
+        self.assertEqual(config.unsupported_features(),
+                         ["speculative draft_token_map", "Parse 3.5 MTP"])
+
+    def test_lookahead_connector_gating_preserves_upstream_multi_token_hashing(self):
         upstream, updated = self.apply_upstream_excerpt(
             "06-pr50897.patch", "vllm/v1/core/kv_cache_utils.py",
-            "kv_cache_planning_move_upstream.py",
-            ("+def generate_lookahead_block_hash_extra_keys(",),
+            "lookahead_hashing_merged_upstream.py",
+            ("+def get_num_hash_lookahead_tokens(",),
         )
-        helpers = {
-            "generate_lookahead_block_hash_extra_keys",
-            "generate_request_block_hash_extra_keys",
-        }
         after = ast.parse(updated)
-        after.body = [n for n in after.body if getattr(n, "name", None) not in helpers]
+        after.body = [n for n in after.body
+                      if getattr(n, "name", None) != "get_num_hash_lookahead_tokens"]
         self.assertEqual(ast.dump(ast.parse(upstream)), ast.dump(after))
-
-        extra_keys = Mock(side_effect=[(("block-image",), 4), (("next-image",), 5)])
-        namespace = {"generate_block_hash_extra_keys": extra_keys}
+        namespace = {}
         exec("from __future__ import annotations\n" + updated, namespace)
-        request = SimpleNamespace(all_token_ids=[10, 11, 12, 13, 14])
-        generate = namespace["generate_request_block_hash_extra_keys"]
-        self.assertEqual(
-            generate(request, 0, 4, 3, True),
-            ((("block-image",), 14, ("next-image",)), 4),
+        resolve = namespace["get_num_hash_lookahead_tokens"]
+        spec = SimpleNamespace(use_eagle_block_drop=lambda: True,
+                               disable_lookahead_block_hashes=False)
+        config = SimpleNamespace(
+            speculative_config=spec, kv_transfer_config=None,
+            attention_config=SimpleNamespace(hisparse_config=None),
+            num_hash_lookahead_tokens=3, num_prefill_lookahead_tokens=3,
         )
-        self.assertEqual(
-            [call.args for call in extra_keys.call_args_list],
-            [(request, 0, 4, 3), (request, 4, 5, 4)],
-        )
-        extra_keys.reset_mock(side_effect=True)
-        extra_keys.return_value = (None, 4)
-        self.assertEqual(generate(request, 0, 4, 3, False), (None, 4))
-        extra_keys.assert_called_once_with(request, 0, 4, 3)
+        supported = SimpleNamespace(supports_lookahead_block_hashes=True)
+        unsupported = SimpleNamespace(supports_lookahead_block_hashes=False)
+        self.assertEqual(resolve(config), 3)
+        config.kv_transfer_config = object()
+        self.assertEqual(resolve(config, supported), 0)  # one-token connectors only
+        config.num_prefill_lookahead_tokens = 1
+        self.assertEqual(resolve(config, supported), 1)
+        self.assertEqual(resolve(config, unsupported), 0)
+        self.assertEqual(resolve(config), 0)
+        spec.disable_lookahead_block_hashes = True
+        self.assertEqual(resolve(config, supported), 0)
+        spec.disable_lookahead_block_hashes = False
+        config.attention_config.hisparse_config = object()
+        self.assertEqual(resolve(config, supported), 0)
+        config.kv_transfer_config = None
+        self.assertEqual(resolve(config), 0)
+        config.attention_config.hisparse_config = None
+        config.num_hash_lookahead_tokens = 0
+        self.assertEqual(resolve(config), 0)
 
     def test_core_and_mooncake_retain_matching_replay_boundaries(self):
-        _, core = self.apply_upstream_excerpt(
-            "06-pr50897.patch", "vllm/v1/core/kv_cache_coordinator.py",
-            "replay_boundaries_upstream.py", ("use_eagle=bool(self.eagle_group_ids)",),
-        )
+        # #61589 now supplies core replay policy unchanged by our patch.
+        core = (PROJECT / "tests/fixtures/qwen38-patch-series/replay_boundaries_upstream.py").read_text()
         _, mooncake = self.apply_upstream_excerpt(
             "06-pr50897.patch",
             "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/coordinator.py",
