@@ -3,10 +3,12 @@
 
 import ast
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import re
 import subprocess
+import statistics
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -314,6 +316,93 @@ class PatchSeriesTests(unittest.TestCase):
         self.assertTrue(result.uses_cold_chain)
         self.assertEqual(result.l2_cache_policy, "cold-chain:4")
         self.assertTrue(result.use_cuda_graph_individual_timing)
+
+    def test_flashinfer_cupti_refresh_preserves_collective_fallback(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
+            "flashinfer_cupti_upstream.py",
+            hunk_terms=("requested_timer = tuning_config.timer",
+                        "self._get_profiling_repeat(tuning_config)"),
+            project="flashinfer",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        before_class, after_class = before.body[-1], after.body[-1]
+        before_profile, before_cupti = before_class.body
+        after_profile, after_cupti = after_class.body
+        before_try = next(n for n in before_profile.body if isinstance(n, ast.Try))
+        after_try = next(n for n in after_profile.body if isinstance(n, ast.Try))
+
+        # Exercise the real timer-selection statements independently of CUDA.
+        selection = ast.Module(body=after_try.body[:3], type_ignores=[])
+        cases = [
+            ("cupti", None, True),
+            (None, None, False),
+            ("cupti", ("auto", "events", "graph"), True),
+            ("cupti", ("events", "events", "graph"), False),
+            ("cupti", ("auto", "events", "eager"), False),
+            (None, ("cupti", "cupti", "graph"), True),
+        ]
+        for timer, policy, expected in cases:
+            with self.subTest(timer=timer, policy=policy):
+                namespace = {
+                    "tuning_config": SimpleNamespace(timer=timer),
+                    "measure_policy": None if policy is None else SimpleNamespace(
+                        _timer=policy[0], timer=policy[1], execution_mode=policy[2]
+                    ),
+                }
+                exec(compile(selection, "timer_selection.py", "exec"), namespace)
+                self.assertEqual(namespace["cupti_requested"], expected)
+
+        # Only timer selection and profiling repeat may change. In particular,
+        # preserve cross-rank availability/failure agreement, preparation after
+        # check_ready, unconditional timing reduction, and exception propagation.
+        after_try.body[:3] = before_try.body[:1]
+        before_spans = next(n for n in ast.walk(before_cupti)
+                            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id == "_cupti_measure_spans")
+        after_spans = next(n for n in ast.walk(after_cupti)
+                           if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                           and n.func.id == "_cupti_measure_spans")
+        after_spans.args[1] = before_spans.args[1]
+        self.assertEqual(ast.dump(before), ast.dump(after))
+
+        sync_status = Mock(return_value=0)
+        runner = Mock()
+        infra_error = type("CuptiInfraError", (RuntimeError,), {})
+
+        def measure(run_iteration, repeat, *, prologue, check_ready, prepare):
+            check_ready(None)
+            runner.assert_not_called()
+            prepare()
+            prologue()
+            run_iteration()
+            return [3.0, 1.0, 2.0]
+
+        measure_spans = Mock(side_effect=measure)
+        namespace = {
+            "_sync_cupti_status": sync_status,
+            "_CuptiInfraError": infra_error,
+            "_profile_measurement_scope": nullcontext,
+            "_cupti_measure_spans": measure_spans,
+            "statistics": statistics, "logger": Mock(),
+        }
+        exec(compile(updated, "cupti_fixture.py", "exec"), namespace)
+        tuner = namespace["AutoTuner"]()
+        tuner.warmup, tuner.repeat = 1, 3
+        tuner._get_profiling_repeat = Mock(return_value=7)
+        tuner._get_input_sizes = Mock(return_value=[])
+        config = SimpleNamespace(use_cold_l2_cache=False, use_cuda_graph=False)
+        self.assertEqual(tuner._profile_single_kernel_cupti(runner, [], 0, config), 2.0)
+        self.assertEqual(measure_spans.call_args.args[1], 7)
+        self.assertEqual(runner.call_count, 2)
+        sync_status.assert_called_once_with(0)
+
+        # A peer that cannot initialize CUPTI must stop local kernel execution.
+        runner.reset_mock()
+        sync_status.return_value = 1
+        with self.assertRaisesRegex(infra_error, "another tuning rank"):
+            tuner._profile_single_kernel_cupti(runner, [], 0, config)
+        runner.assert_not_called()
 
     def test_flashinfer_refresh_preserves_sm107_and_adds_sm12x_dispatch(self):
         _, updated = self.apply_upstream_excerpt(

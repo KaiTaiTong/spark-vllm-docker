@@ -60,6 +60,21 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+On October 29, pipeline 380 stopped at FlashInfer patch 02 on upstream
+`82e93625e87b196a9cb0d83fd5d85a29b8e7bdc7`. Upstream now coordinates CUPTI
+availability, initialization, and failure handling across tuning ranks. The
+autotuner section preserves that coordination, including initialization before
+warmup and graph capture, while retaining per-operation timer selection and
+profiling repeats. The recorded PR snapshot and all other file sections are
+unchanged.
+
+The complete patch applies to the failed revision without old patch-base
+objects, all 17 changed Python files compile, and reapplication is detected.
+All 23 CPU series tests pass. The new regression reproduces the old conflict,
+preserves upstream collective fallback, verifies timer-policy precedence, and
+checks that peer initialization failure prevents local warmup. Full wheel
+compilation and inference remain for CI.
+
 The next October 27 run, job 685, reached patch 10 on upstream vLLM
 `c4f2bb4abbdbad9ed5b0a71acd0bd585056eeab8` and conflicted with the new RDNA
 hybrid prefill-dequantization setting. Patch 10 now retains that setting and

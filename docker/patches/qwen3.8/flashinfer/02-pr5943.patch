@@ -4,9 +4,11 @@ Subject: [PATCH] feat(gemm): add SM12x MXFP8 support to the CuTe DSL mm_mxfp8 ba
 Upstream-PR: https://github.com/flashinfer-ai/flashinfer/pull/5943
 Upstream-Commit: 15c5c8d21388c118558c8370299204aa4b110ced
 Integration-Base: 431c9687f3bb9a048e194c74a178d7cfb02b1585
+Autotuner-Integration-Base: 82e93625e87b196a9cb0d83fd5d85a29b8e7bdc7
 
 Preserve upstream cold-chain and individual timing, dataclass overrides,
-and SM107 low-M GEMM dispatch.
+and SM107 low-M GEMM dispatch. Preserve collective CUPTI fallback and
+initialization-before-warmup while honoring per-operation timing/repeats.
 
 diff --git a/benchmarks/routines/flashinfer_benchmark_utils.py b/benchmarks/routines/flashinfer_benchmark_utils.py
 index 2407b18fc7bc1d994e4d053ee4bf1aac2ff55085..ae1b57d5034084f822114bb55fc440f426a44bd6 100644
@@ -45,10 +47,10 @@ index b43b93d3b1cb5144476c4dcad6a00e420b175619..e5f61ea1ea82a65aa5fb473fd579d322
          )
          input_mxfp8, mat2_mxfp8, input_scale, mat2_scale = inputs
 diff --git a/flashinfer/autotuner/autotuner.py b/flashinfer/autotuner/autotuner.py
-index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb81cf51c4 100644
+index 0cb45694e4244826309ce5f3b6bc43c255edca75..30c7954c05926b9c6e5b816ec1ed75df3e9470a7 100644
 --- a/flashinfer/autotuner/autotuner.py
 +++ b/flashinfer/autotuner/autotuner.py
-@@ -540,6 +540,16 @@ class TuningConfig:
+@@ -541,6 +541,16 @@ class TuningConfig:
              Cold-L2 profiling uses a separate measurement path. This
              choice is recorded as tuning provenance because it can change the
              winner; ordinary lookup can still consume that winner.
@@ -65,7 +67,7 @@ index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb
      """
  
      dynamic_tensor_specs: tuple[DynamicTensorSpec, ...] = ()
-@@ -561,6 +571,8 @@ class TuningConfig:
+@@ -562,6 +572,8 @@ class TuningConfig:
      # (e.g. token_selected_experts in MoE workloads).
      inputs_pre_hook: Callable | None = None
      use_cuda_graph_individual_timing: bool = False
@@ -74,7 +76,7 @@ index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb
  
      @property
      def uses_cold_chain(self) -> bool:
-@@ -2886,6 +2898,9 @@ class AutoTuner:
+@@ -2920,6 +2932,9 @@ class AutoTuner:
                          min_time = float("inf")
                          # Initialize runner and tactic as None in case of no valid tactic or runners are found
                          runner_id, tactic = None, None
@@ -84,7 +86,7 @@ index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb
                          skipped_count = 0
                          for r_id, r in enumerate(runners):
                              runner_preparation_oom = False
-@@ -3049,10 +3064,21 @@ class AutoTuner:
+@@ -3083,10 +3098,21 @@ class AutoTuner:
                                      # Set time_measured to inf to notify the failure of the tactic. This can happen when `get_valid_tactics` mistakenly return wrong tactics
                                      # or some runtime error occurs during profiling.
                                      time_measured = float("inf")
@@ -106,10 +108,13 @@ index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb
                          if skipped_count > 0:
                              logger.info(
                                  f"[Autotuner]: Skipped {skipped_count} unsupported tactic(s) for {custom_op} "
-@@ -3751,9 +3777,17 @@ class AutoTuner:
-             # any other.  A CUPTI *infrastructure* failure (single-subscriber
-             # conflict) is not a tactic failure: fall back to the CUDA-event
-             # path for this and all later measurements.
+@@ -3779,9 +3805,16 @@ class AutoTuner:
+         # fallback).
+         profile_exc: Optional[BaseException] = None
+         try:
+-            cupti_requested = (
+-                measure_policy is not None and measure_policy.timer == "cupti"
+-            )
 +            # The op's timer applies unless the policy pins one (explicit
 +            # timer or eager execution, which must include host cost).
 +            requested_timer = tuning_config.timer
@@ -119,24 +124,19 @@ index bc6aae29ecf9f875cea2baa4df6176355b652bb2..79b7da6a68f3f66aa7ab519ec03eaeeb
 +                or measure_policy.execution_mode == "eager"
 +            ):
 +                requested_timer = measure_policy.timer
-             use_cupti = (
--                measure_policy is not None
--                and measure_policy.timer == "cupti"
-+                requested_timer == "cupti"
-                 and not self._cupti_disabled
-                 and _load_cupti() is not None
-             )
-@@ -3982,7 +4016,9 @@ class AutoTuner:
-                     runner(inputs, tactic=tactic, **kwargs)
++            cupti_requested = requested_timer == "cupti"
+             use_cupti = False
+             cupti_error = None
+             if cupti_requested:
+@@ -4036,7 +4069,7 @@ class AutoTuner:
  
              spans_ms = _cupti_measure_spans(
--                run_iteration, self.repeat, prologue=prologue
-+                run_iteration,
+                 run_iteration,
+-                self.repeat,
 +                self._get_profiling_repeat(tuning_config),
-+                prologue=prologue,
-             )
- 
-         # Median, not mean: robust to first-iteration instrumentation
+                 prologue=prologue,
+                 check_ready=check_ready,
+                 prepare=prepare,
 diff --git a/flashinfer/gemm/gemm_base.py b/flashinfer/gemm/gemm_base.py
 index 8a42262f7c7c0c9574e5936b95136a32af050c4f..8115b73b58b3d9330bac88984de2fb0f9f1451d5 100644
 --- a/flashinfer/gemm/gemm_base.py
