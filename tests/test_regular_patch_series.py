@@ -3,10 +3,12 @@
 
 import ast
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import re
 import subprocess
+import statistics
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -212,6 +214,75 @@ class PatchSeriesTests(unittest.TestCase):
         compile(updated, path, "exec")
         return upstream, updated
 
+    def test_qsa_ring_patch_preserves_upstream_bf16_indexer_test(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "05-pr54912.patch", "tests/models/qwen4_exp/test_config.py",
+            "qsa_config_upstream.py",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        added_tests = {
+            "test_qsa_ring_capacity_divides_block_size",
+            "test_qsa_ring_capacity_widens_within_bound",
+            "test_qsa_ring_capacity_refuses_disproportionate_widening",
+        }
+        added_imports = {
+            "vllm.models.qwen4_exp.common.qsa_cache",
+            "vllm.utils.math_utils",
+        }
+        functions = [n.name for n in after.body if isinstance(n, ast.FunctionDef)]
+        for name in added_tests:
+            self.assertEqual(functions.count(name), 1)
+        self.assertEqual(
+            {n.module: [alias.name for alias in n.names]
+             for n in after.body if isinstance(n, ast.ImportFrom)
+             and n.module in added_imports},
+            {"vllm.models.qwen4_exp.common.qsa_cache":
+             ["QSA_RING_MAX_WIDENING", "qsa_ring_capacity"],
+             "vllm.utils.math_utils": ["cdiv"]},
+        )
+        after.body = [n for n in after.body if not (
+            isinstance(n, ast.FunctionDef) and n.name in added_tests
+            or isinstance(n, ast.ImportFrom) and n.module in added_imports
+        )]
+        # Preserve the new model imports and BF16-indexer regression verbatim.
+        self.assertEqual(ast.dump(before), ast.dump(after))
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_unquantized_backend_preserves_rdna_prefill_setting(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "10-pr59021.patch", "vllm/config/kernel.py",
+            "kernel_rdna_prefill_upstream.py",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        kernel = next(n for n in after.body if isinstance(n, ast.ClassDef))
+        field_index = next(
+            i for i, n in enumerate(kernel.body) if isinstance(n, ast.AnnAssign)
+            and n.target.id == "unquantized_linear_backend"
+        )
+        self.assertEqual(kernel.body[field_index].value.value, "auto")
+        self.assertIsInstance(kernel.body[field_index + 1], ast.Expr)
+        del kernel.body[field_index:field_index + 2]
+        normalizer = next(n for n in kernel.body if isinstance(n, ast.FunctionDef)
+                          and n.name == "_normalize_linear_backend")
+        validator = normalizer.decorator_list[0]
+        self.assertEqual([arg.value for arg in validator.args],
+                         ["linear_backend", "unquantized_linear_backend"])
+        validator.args.pop()
+        # Only the new field/docstring and validator registration may differ.
+        self.assertEqual(ast.dump(before), ast.dump(after))
+
+        namespace = {
+            "Field": lambda **kwargs: kwargs["default"],
+            "field_validator": lambda *args, **kwargs: lambda fn: fn,
+        }
+        exec(compile(updated, "kernel_fixture.py", "exec"), namespace)
+        config = namespace["KernelConfig"]
+        self.assertEqual(config._normalize_linear_backend("FLASHINFER-CUDNN"),
+                         "flashinfer_cudnn")
+        self.assertEqual(config.rdna_hybrid_w4a16_prefill_dequant, "disable")
+        self.assertEqual(config._normalize_rdna_hybrid_w4a16_prefill_dequant("ENABLE"),
+                         "enable")
+
     def test_flashinfer_refresh_preserves_tuning_policy_and_overrides(self):
         upstream, updated = self.apply_upstream_excerpt(
             "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
@@ -245,6 +316,93 @@ class PatchSeriesTests(unittest.TestCase):
         self.assertTrue(result.uses_cold_chain)
         self.assertEqual(result.l2_cache_policy, "cold-chain:4")
         self.assertTrue(result.use_cuda_graph_individual_timing)
+
+    def test_flashinfer_cupti_refresh_preserves_collective_fallback(self):
+        upstream, updated = self.apply_upstream_excerpt(
+            "02-pr5943.patch", "flashinfer/autotuner/autotuner.py",
+            "flashinfer_cupti_upstream.py",
+            hunk_terms=("requested_timer = tuning_config.timer",
+                        "self._get_profiling_repeat(tuning_config)"),
+            project="flashinfer",
+        )
+        before, after = ast.parse(upstream), ast.parse(updated)
+        before_class, after_class = before.body[-1], after.body[-1]
+        before_profile, before_cupti = before_class.body
+        after_profile, after_cupti = after_class.body
+        before_try = next(n for n in before_profile.body if isinstance(n, ast.Try))
+        after_try = next(n for n in after_profile.body if isinstance(n, ast.Try))
+
+        # Exercise the real timer-selection statements independently of CUDA.
+        selection = ast.Module(body=after_try.body[:3], type_ignores=[])
+        cases = [
+            ("cupti", None, True),
+            (None, None, False),
+            ("cupti", ("auto", "events", "graph"), True),
+            ("cupti", ("events", "events", "graph"), False),
+            ("cupti", ("auto", "events", "eager"), False),
+            (None, ("cupti", "cupti", "graph"), True),
+        ]
+        for timer, policy, expected in cases:
+            with self.subTest(timer=timer, policy=policy):
+                namespace = {
+                    "tuning_config": SimpleNamespace(timer=timer),
+                    "measure_policy": None if policy is None else SimpleNamespace(
+                        _timer=policy[0], timer=policy[1], execution_mode=policy[2]
+                    ),
+                }
+                exec(compile(selection, "timer_selection.py", "exec"), namespace)
+                self.assertEqual(namespace["cupti_requested"], expected)
+
+        # Only timer selection and profiling repeat may change. In particular,
+        # preserve cross-rank availability/failure agreement, preparation after
+        # check_ready, unconditional timing reduction, and exception propagation.
+        after_try.body[:3] = before_try.body[:1]
+        before_spans = next(n for n in ast.walk(before_cupti)
+                            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id == "_cupti_measure_spans")
+        after_spans = next(n for n in ast.walk(after_cupti)
+                           if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                           and n.func.id == "_cupti_measure_spans")
+        after_spans.args[1] = before_spans.args[1]
+        self.assertEqual(ast.dump(before), ast.dump(after))
+
+        sync_status = Mock(return_value=0)
+        runner = Mock()
+        infra_error = type("CuptiInfraError", (RuntimeError,), {})
+
+        def measure(run_iteration, repeat, *, prologue, check_ready, prepare):
+            check_ready(None)
+            runner.assert_not_called()
+            prepare()
+            prologue()
+            run_iteration()
+            return [3.0, 1.0, 2.0]
+
+        measure_spans = Mock(side_effect=measure)
+        namespace = {
+            "_sync_cupti_status": sync_status,
+            "_CuptiInfraError": infra_error,
+            "_profile_measurement_scope": nullcontext,
+            "_cupti_measure_spans": measure_spans,
+            "statistics": statistics, "logger": Mock(),
+        }
+        exec(compile(updated, "cupti_fixture.py", "exec"), namespace)
+        tuner = namespace["AutoTuner"]()
+        tuner.warmup, tuner.repeat = 1, 3
+        tuner._get_profiling_repeat = Mock(return_value=7)
+        tuner._get_input_sizes = Mock(return_value=[])
+        config = SimpleNamespace(use_cold_l2_cache=False, use_cuda_graph=False)
+        self.assertEqual(tuner._profile_single_kernel_cupti(runner, [], 0, config), 2.0)
+        self.assertEqual(measure_spans.call_args.args[1], 7)
+        self.assertEqual(runner.call_count, 2)
+        sync_status.assert_called_once_with(0)
+
+        # A peer that cannot initialize CUPTI must stop local kernel execution.
+        runner.reset_mock()
+        sync_status.return_value = 1
+        with self.assertRaisesRegex(infra_error, "another tuning rank"):
+            tuner._profile_single_kernel_cupti(runner, [], 0, config)
+        runner.assert_not_called()
 
     def test_flashinfer_refresh_preserves_sm107_and_adds_sm12x_dispatch(self):
         _, updated = self.apply_upstream_excerpt(
@@ -593,6 +751,87 @@ class PatchSeriesTests(unittest.TestCase):
                         hidden = Rows([0] * (2 if sequence_parallel else 4))
                         result = module.forward(hidden, Rows(range(4)), None, None)
                         self.assertEqual(result, [2] * len(hidden))
+
+    def test_confidence_stop_preserves_watermarked_and_sharded_sampling(self):
+        _, updated = self.apply_upstream_excerpt(
+            "04-pr60068.patch",
+            "vllm/v1/worker/gpu/spec_decode/speculator.py",
+            "draft_sampling_upstream.py", ("self.confidence_stop.update",),
+        )
+        namespace = {}
+        exec("from __future__ import annotations\n" + updated, namespace)
+        for route in ("watermark", "gumbel", "greedy"):
+            for confidence_enabled in (False, True):
+                with self.subTest(route=route, confidence=confidence_enabled):
+                    events = []
+
+                    class Logits(list):
+                        def argmax(self, dim):
+                            self.argmax_dim = dim
+                            events.append("greedy")
+                            return "greedy"
+
+                    logits = Logits([11.0])
+
+                    def sample(values, *args, **kwargs):
+                        events.append(route)
+                        values[0] = -1.0  # Sampling can change logits in place.
+                        return route
+
+                    sampler = Mock(side_effect=sample)
+                    namespace["gumbel_sample"] = sampler
+                    confidence = Mock(side_effect=lambda values, step: events.append(
+                        ("confidence", list(values), step)
+                    ))
+                    speculator = namespace["DraftModelSpeculator"]()
+                    speculator.use_local_argmax_reduction = False
+                    speculator.confidence_stop = (
+                        SimpleNamespace(update=confidence) if confidence_enabled else None
+                    )
+                    speculator.draft_watermarker = (
+                        SimpleNamespace(sample=sampler) if route == "watermark" else None
+                    )
+                    speculator.compute_draft_logits = Mock(return_value=logits)
+                    speculator.use_fp64_gumbel = True
+                    speculator.draft_logits_num_shards = 3
+                    speculator.draft_logits_shard_idx = 1
+                    speculator._maybe_predict_acceptance = Mock()
+                    cache = None if route == "greedy" else object()
+                    result = speculator.sample_draft(
+                        "hidden", "positions", "indices", "temperature", "seeds",
+                        2, cache, spec_step_idx=1, num_steps=2,
+                    )
+                    self.assertEqual(result, route)
+                    self.assertEqual(events,
+                                     ([("confidence", [11.0], 2)] if confidence_enabled
+                                      else []) + [route])
+                    speculator.compute_draft_logits.assert_called_once_with("hidden", 1)
+                    speculator._maybe_predict_acceptance.assert_called_once_with(
+                        logits, "indices", 2,
+                    )
+                    if route == "greedy":
+                        sampler.assert_not_called()
+                        self.assertEqual(logits.argmax_dim, -1)
+                    else:
+                        kwargs = sampler.call_args.kwargs
+                        self.assertIs(kwargs["logits_cache"], cache)
+                        self.assertEqual(kwargs["logits_cache_col"], 2)
+                        self.assertTrue(kwargs["apply_temperature"])
+                        if route == "watermark":
+                            self.assertEqual(kwargs["num_steps"], 2)
+                        else:
+                            self.assertEqual(kwargs["logits_cache_num_shards"], 3)
+                            self.assertEqual(kwargs["logits_cache_shard_idx"], 1)
+
+        speculator.use_local_argmax_reduction = True
+        speculator.confidence_stop = None
+        speculator.get_draft_top_tokens = Mock(return_value="local")
+        speculator.compute_draft_logits.reset_mock()
+        self.assertEqual(speculator.sample_draft(
+            "hidden", None, None, None, None, 0, None, spec_step_idx=2,
+        ), "local")
+        speculator.get_draft_top_tokens.assert_called_once_with("hidden", 2)
+        speculator.compute_draft_logits.assert_not_called()
 
     def test_confidence_stop_disables_fused_decode_after_metadata_refactor(self):
         _, updated = self.apply_upstream_excerpt(

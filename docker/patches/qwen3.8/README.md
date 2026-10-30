@@ -60,6 +60,63 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
+On October 29, pipeline 380 stopped at FlashInfer patch 02 on upstream
+`82e93625e87b196a9cb0d83fd5d85a29b8e7bdc7`. Upstream now coordinates CUPTI
+availability, initialization, and failure handling across tuning ranks. The
+autotuner section preserves that coordination, including initialization before
+warmup and graph capture, while retaining per-operation timer selection and
+profiling repeats. The recorded PR snapshot and all other file sections are
+unchanged.
+
+The complete patch applies to the failed revision without old patch-base
+objects, all 17 changed Python files compile, and reapplication is detected.
+All 23 CPU series tests pass. The new regression reproduces the old conflict,
+preserves upstream collective fallback, verifies timer-policy precedence, and
+checks that peer initialization failure prevents local warmup. Full wheel
+compilation and inference remain for CI.
+
+The next October 27 run, job 685, reached patch 10 on upstream vLLM
+`c4f2bb4abbdbad9ed5b0a71acd0bd585056eeab8` and conflicted with the new RDNA
+hybrid prefill-dequantization setting. Patch 10 now retains that setting and
+its validator alongside the independent unquantized-linear backend override.
+
+All 15 patches and 19 subsequent Docker source patchers replay on fresh
+archives of both the failed revision and upstream main
+`c56706e88e0a699274e7ed807e072274048d1c33`. CUTLASS pinning passes and all 114
+changed Python files compile on both revisions. The 22 CPU series tests and
+101 build checks pass; the new regression preserves the RDNA setting and
+normalization while adding the unquantized override. Full wheel compilation
+and inference remain for CI.
+
+Later on October 27, job 684 stopped at patch 05 on upstream vLLM
+`6aa70c4beca4f85c44b9f04c23f46326d9261f14`. Upstream added model imports and
+a BF16-indexer regression test in `tests/models/qwen4_exp/test_config.py`.
+Patch 05's test section now preserves those additions alongside all three QSA
+ring tests. Its runtime patch is unchanged.
+
+All 15 patches replay from a fresh source archive without old patch-base
+objects and produce the same tree as the development replay. All 19 subsequent
+Docker source patchers and CUTLASS pinning pass; all 114 changed Python files
+compile. The 21 CPU series tests and 101 build checks pass. The new regression
+reproduces the old import conflict and checks that upstream's BF16-indexer test
+survives. Full wheel compilation and inference remain for CI.
+
+On October 27, pipeline 378 stopped at patch 04 on upstream vLLM
+`90309f6b742cdb1d6305778b81063918cf61be81`. The draft sampler now dispatches
+watermarked and ordinary probabilistic sampling through separate branches.
+Patch 04 keeps both branches, including the sharded-logit arguments, and
+updates confidence before either sampler can modify the logits in place.
+Patch 05's test-import context was also refreshed after upstream removed the
+Qwen3.5 model-config import; the QSA ring implementation and tests are retained.
+
+All 15 patches apply directly to a fresh archive of that revision without old
+patch-base objects, and the resulting tree matches the development replay.
+All 19 subsequent Docker source patchers pass and all 114 changed Python files
+compile. The 20 CPU series tests and 101 build checks pass. The new regression
+covers watermark, sharded probabilistic, greedy, and local-argmax draft sampling,
+including confidence checks before in-place logit modification. Full wheel
+compilation and inference remain for CI.
+
 On October 26, patches 03, 04, 06, 07, and 08 were refreshed against pipeline
 377's failed vLLM base `fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5`. Patch 03 keeps
 the new Parse MTP validation beside the draft-vocabulary guard. Upstream
