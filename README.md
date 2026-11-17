@@ -338,6 +338,16 @@ for additional launcher options.
 
 ## CHANGELOG
 
+### 2026-11-06
+
+Regular source builds now use PyTorch 2.14.0 and torchvision 0.29.0, matching
+upstream vLLM's CUDA requirements. DeepGEMM's
+[native stable API wrappers](https://github.com/vllm-project/DeepGEMM/pull/45)
+require PyTorch 2.14 headers even though the runtime ABI targets 2.11; compiling
+them against 2.13 caused the regular build failure. Dependency preparation now
+checks the selected DeepGEMM source's declared header requirement before C++
+compilation. The B12X preset retains PyTorch 2.13.0 and torchvision 0.28.0.
+
 ### 2026-10-16
 
 'glm-5.3-flash` recipe now uses a new FP4-Local checkpoint from NVIDIA, replacing an older version hosted in local-inference-lab repository. As with Qwen, this checkpoint features compressed scales and is QAD quantized. Up to 2M KV cache on dual Sparks!
@@ -1740,8 +1750,10 @@ Source builds select DeepGEMM after applying vLLM patches. vLLM refs that requir
 the stable-ABI `deep_gemm/_C.py` interface use the repository and commit declared
 in that ref's CMake configuration. Older refs, including the current B12X fork,
 retain the pinned DeepGEMM SM121 workaround. The build checks required source
-files before compiling and records the selected commit in `.deepgemm-commit`
-alongside the exported wheels.
+files and declared PyTorch header requirements before compiling, and records
+the selected commit in `.deepgemm-commit` alongside the exported wheels.
+Regular builds use PyTorch 2.14.0 and torchvision 0.29.0: current DeepGEMM
+requires 2.14 headers even though its stable runtime ABI targets 2.11.
 
 **Basic usage (prepare local image):**
 
@@ -1962,7 +1974,8 @@ repository. Source checkout caches are isolated by repository as well.
 Neither lane installs the standalone `b12x` package from PyPI or Git. B12X is
 part of FlashInfer, including the compatibility imports and cache-integrity
 fix in the fork. Build metadata records the FlashInfer repository, ref, and
-commit. Both current build profiles use PyTorch 2.13.0.
+commit. The B12X preset uses PyTorch 2.13.0 and torchvision 0.28.0; regular
+builds use PyTorch 2.14.0 and torchvision 0.29.0. Both use torchaudio 2.11.0.
 
 **Copy existing image without rebuilding:**
 
@@ -1985,8 +1998,8 @@ commit. Both current build profiles use PyTorch 2.13.0.
 | `--vllm-repo <url>` | vLLM Git repository. Defaults to `https://github.com/vllm-project/vllm.git`; custom repositories bypass the shared checkout cache and force a source build. |
 | `--vllm-source-dir <path>` | Build vLLM from a clean local Git checkout staged into Docker without remote credentials. Incompatible with `--vllm-repo`, wheel/download-only paths, `--no-build`, and experimental build profiles. |
 | `--vllm-ref <ref>` | vLLM commit SHA, branch or tag. Defaults to `main` for remote repositories and the current `HEAD` with `--vllm-source-dir`. |
-| `--torch-version <version>` | PyTorch version installed in source-build and runner stages (default: `2.13.0`) |
-| `--torchvision-version <version>` | Optional torchvision version (default: `0.28.0`) |
+| `--torch-version <version>` | PyTorch version installed in source-build and runner stages (default: `2.14.0`) |
+| `--torchvision-version <version>` | Optional torchvision version (default: `0.29.0`) |
 | `--torchaudio-version <version>` | Optional torchaudio version (default: `2.11.0`; use `none` to omit it) |
 | `--flashinfer-ref <ref>` | FlashInfer commit SHA, branch or tag (default: `main`) |
 | `--apply-vllm-pr <pr-or-url>` | Apply a vLLM PR patch during the image build. Numbers select `vllm-project/vllm`; full `https://github.com/OWNER/REPO/pull/NUMBER` URLs select another public GitHub repository. Repeatable. This is distinct from the launch-time option accepted by `launch-cluster.sh` and `run-recipe.sh`. |
@@ -2605,16 +2618,18 @@ To use it, include `--load-format fastsafetensors` when running vLLM:
 InstantTensor is available with `--load-format instanttensor`. Several large-model recipes use it to reduce load-time memory pressure.
 
 Regular and B12X runner builds, including regular `--use-wheels` builds, patch
-InstantTensor to use vLLM's available-memory accounting for its loading-buffer
-budget. This includes reclaimable OS memory on native DGX Spark and preserves
-the existing CUDA-based accounting under WSL. InstantTensor's budget fraction
+InstantTensor to preserve CUDA's available-memory budget under WSL instead of
+using guest RAM availability. InstantTensor's budget fraction
 (`INSTANTTENSOR_MAX_FREE_MEM_USAGE`, default `0.5`), minimum across distributed
 ranks, and buffer-size checks still apply.
 
-InstantTensor 0.2.1 includes native Linux UMA accounting, but does not exclude
-WSL from that path. The patch remains necessary for the WSL policy and supports
-both 0.2.0 and 0.2.1, preserving 0.2.1's budget validation and error handling
-across distributed ranks.
+InstantTensor 0.2.3 moved memory negotiation to `_internal/resources.py` and
+already accounts for native UMA, cgroup limits, ranks sharing a host, and the
+combined host/device buffer budget. The helper preserves that accounting and
+only excludes CUDA-on-WSL from the integrated-memory path, which upstream still
+selects using `is_integrated` alone. Older 0.2.0/0.2.1 layouts continue to use
+vLLM's memory snapshot, with their existing validation and collective error
+handling preserved.
 
 These runners also default to `INSTANTTENSOR_IO_DEPTH=16` to reduce GPU and
 pinned host staging-buffer usage. Override it through a recipe's `env` settings
