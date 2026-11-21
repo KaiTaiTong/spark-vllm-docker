@@ -374,6 +374,17 @@ test_non_default_gpu_arch_uses_wheel_build() {
     pass "non-default gpu arch rebuilds FlashInfer for regular builds"
 }
 
+test_multi_arch_regular_build() {
+    setup_fixture
+    local archs="10.3a 12.0a 12.1a"
+    run_build --gpu-arch "$archs" || fail "multi-architecture regular build failed"
+    assert_log_contains "TORCH_CUDA_ARCH_LIST=$archs --build-arg FLASHINFER_CUDA_ARCH_LIST=$archs"
+    assert_log_contains 'NCCL_NVCC_GENCODE=-gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_121,code=sm_121'
+    assert_log_contains '^docker build --target vllm-export .*VLLM_PRESERVE_SM12X_TARGET=1'
+    assert_log_not_contains 'VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
+    pass "regular multi-architecture builds target Spark, Station and RTX Pro"
+}
+
 test_default_prebuilt_ignores_local_flashinfer_arch() {
     setup_fixture
     printf '12.0f\n' > "$FIXTURE_DIR/.wheel-cache/flashinfer/regular/.flashinfer-arch"
@@ -1811,6 +1822,13 @@ test_build_dependency_updates() {
     pass "FlashInfer wheels build with the selected settings"
 }
 
+test_cudnn_frontend_compat() {
+    if ! python3 "$PROJECT_DIR/tests/test_cudnn_frontend_compat.py"; then
+        fail "cuDNN frontend compatibility tests failed"
+    fi
+    pass "FlashInfer and vLLM source builds support cuDNN frontend 1.33"
+}
+
 test_copied_vllm_git_index_is_refreshed_before_patch_apply() {
     local source_repo="$TMP_BASE/git-index-source"
     local copied_repo="$TMP_BASE/git-index-copy"
@@ -1946,8 +1964,8 @@ test_dockerfile_externalizes_vllm_source_patches() {
             fail "Dockerfile does not execute external patch: $patch_name"
         fi
     done
-    if [ "$patch_count" -ne 19 ]; then
-        fail "Expected 19 external vLLM patch scripts, found $patch_count"
+    if [ "$patch_count" -ne 20 ]; then
+        fail "Expected 20 external vLLM patch scripts, found $patch_count"
     fi
     if ! python3 -c '
 from pathlib import Path
@@ -2027,6 +2045,7 @@ test_tf5_uses_prebuilt_tf5_tag
 test_custom_tag_uses_prebuilt_custom_tag
 test_default_gpu_arch_stays_prebuilt
 test_non_default_gpu_arch_uses_wheel_build
+test_multi_arch_regular_build
 test_default_prebuilt_ignores_local_flashinfer_arch
 test_regular_build_rebuilds_mismatched_cached_flashinfer_arch
 test_regular_build_reuses_matching_cached_flashinfer_arch
@@ -2117,6 +2136,7 @@ test_dockerfile_pins_cutlass_dsl_47_everywhere
 test_dockerfile_uses_profiled_named_wheel_contexts
 test_dockerfile_omits_standalone_b12x
 test_build_dependency_updates
+test_cudnn_frontend_compat
 test_copied_vllm_git_index_is_refreshed_before_patch_apply
 test_dockerfile_applies_flashinfer_prs_without_merging_branch_history
 test_dockerfile_uses_prepared_python_for_flashinfer_builds
