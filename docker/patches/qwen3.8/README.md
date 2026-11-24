@@ -41,6 +41,12 @@ The vLLM order is:
     persistent Mamba2 aligned state indices and accepted-token buffers as CUDA
     graph inputs, avoiding redundant metadata copies. Frozen at
     `26490d2c7b9646bb722e20873e0127a52f10417d`, with upstream aliasing tests.
+14. Gather MLA prefill queries before latent expansion under decode context
+    parallelism. Set `mla_dcp_query_gather_min_tokens` to a positive threshold
+    to enable it. The default is zero. [vLLM #66906](https://github.com/vllm-project/vllm/pull/66906)
+15. Enable decode context parallelism in the FlashInfer sparse MLA backend on
+    SM120 and SM121 with BF16 queries and a packed FP8 KV cache.
+    [vLLM #66909](https://github.com/vllm-project/vllm/pull/66909)
 
 Disk-offloaded PLE tables from
 [#59958](https://github.com/vllm-project/vllm/pull/59958) are supplied by upstream
@@ -71,15 +77,19 @@ upstream commit `397b9607c83cf201f3c44684c555c3698869b6bd`.
 
 ## Integration and refresh
 
-The regular stack applies to vLLM `1bdc437402d6eee29d3ca543c91574f8acc72c8d`
-and FlashInfer `9bd0a68c94687ad920d2de04284370397a073798`. All eleven
-vendored PR heads match their recorded revisions. Closed vLLM #60646 still
-provides the CSF decoder used by patches 16 and 17. Closed #58028 still
-provides the Python authentication changes applied before wheel compilation.
-The selected vLLM source already has the CUDA-on-WSL guard. The shared patcher
-recognizes it at both the source and installed-wheel steps and still supports
-older inputs. All 40 regular-series tests passed with CPU Torch and NumPy,
-and all 111 build-and-copy checks passed.
+On November 23 the complete series applied to vLLM
+`179ebd9896cff5fddc27f622649ff4c99ed5c733` and FlashInfer
+`560d7e296484ce898d1ff508a02916f51ad2287d` from clean source archives.
+All eleven vendored PR heads match their patch headers. vLLM #59021 and
+#60646 closed without merging. Patch 10 still supplies independent unquantized
+linear selection, and patches 16 and 17 still use the CSF decoder from patch 14.
+The separate Python authentication backport tracks closed, unmerged #58028 at
+`ab14efdfba010131813212021363282d1b41f2e3`.
+
+The selected FlashInfer already includes the output fix from #9765. The
+shared cuDNN patcher skips that source and lifts the cap from vLLM #68566 on
+the selected vLLM source. The CUDA-on-WSL guard is already present in vLLM.
+All 40 regular-series tests passed with CPU Torch and NumPy.
 
 On November 21 the regular series was replayed on vLLM
 `a5a902d02328e48493775ed75e352059e9d3b3b0` and FlashInfer
